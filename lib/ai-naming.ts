@@ -26,22 +26,28 @@ function sanitizeLabel(value: string) {
     .slice(0, 18);
 }
 
-export async function generateSmartNames(prompt: string, limit: number): Promise<{ names: string[]; provider: "openai" | "fallback" }> {
-  const fallback = generateNames(prompt, limit);
+export async function generateSmartNames(
+  prompt: string,
+  limit: number,
+  options: { exclude?: string[]; tld?: string; batch?: number } = {},
+): Promise<{ names: string[]; provider: "openai" | "fallback" }> {
+  const exclude = Array.from(new Set((options.exclude ?? []).map(sanitizeLabel).filter(Boolean))).slice(0, 500);
+  const fallback = generateNames(prompt, limit, { exclude, tld: options.tld });
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return { names: fallback, provider: "fallback" };
 
   try {
+    const exclusionText = exclude.length ? `\nDo NOT repeat any of these previously generated names:\n${exclude.join(", ")}` : "";
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(20000),
       body: JSON.stringify({
         model: process.env.OPENAI_MODEL || "gpt-5.6-luna",
-        input: `You are a senior brand strategist and domain naming specialist.\n\nBusiness idea: ${prompt}\n\nGenerate exactly ${limit} strong brand names for this business. Avoid boring literal keyword domains. Use sector vocabulary, associations, memorable invented words, premium-sounding compounds and names that can grow beyond one product. Names must be easy to pronounce in Polish or internationally, 4-14 ASCII letters, without spaces, hyphens, numbers or domain extensions. Do not imitate famous brands or obvious trademarks. Return only the requested structured data.`,
+        input: `You are a senior naming strategist. The user may enter either a business description OR one seed word/name.\n\nInput: ${prompt}\nTarget TLD: .${options.tld || "pl"}\nBatch: ${options.batch || 1} of 5.\n\nGenerate exactly ${limit} UNIQUE brand/name candidates. If the input is a single word or short name, prioritize close lexical, phonetic, morphological and semantic variations of that exact word: natural prefixes/suffixes, tasteful spelling shifts, syllable blends, abbreviations and invented forms that still feel related. If it is a business description, use its vocabulary and associations. Make the set appropriate for the target TLD and noticeably different from earlier batches. Names must be 4-18 ASCII letters, no spaces, hyphens, numbers or extensions. Avoid famous brands and obvious trademarks.${exclusionText}\nReturn only the structured data.`,
         text: {
           format: {
             type: "json_schema",
@@ -62,7 +68,7 @@ export async function generateSmartNames(prompt: string, limit: number): Promise
             },
           },
         },
-        max_output_tokens: 1800,
+        max_output_tokens: 6000,
       }),
     });
 
@@ -71,9 +77,10 @@ export async function generateSmartNames(prompt: string, limit: number): Promise
     const text = outputText(payload);
     if (!text) return { names: fallback, provider: "fallback" };
     const parsed = JSON.parse(text) as { names?: string[] };
+    const excluded = new Set(exclude);
     const aiNames = (parsed.names ?? [])
       .map(sanitizeLabel)
-      .filter((name) => name.length >= 4 && name.length <= 14);
+      .filter((name) => name.length >= 4 && name.length <= 18 && !excluded.has(name));
     const names = Array.from(new Set([...aiNames, ...fallback])).slice(0, limit);
     return { names, provider: aiNames.length ? "openai" : "fallback" };
   } catch {
