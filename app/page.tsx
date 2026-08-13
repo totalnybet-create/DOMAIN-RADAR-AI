@@ -1,9 +1,11 @@
 "use client";
 
-import { FormEvent, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { DomainResult, StreamEvent } from "@/lib/types";
 
 const TLD_OPTIONS = ["pl", "com", "eu", "shop", "store", "online"];
+
+type LogItem = { time: string; text: string };
 
 export default function Home() {
   const [prompt, setPrompt] = useState("Sklep internetowy z odzieżą premium i streetwear");
@@ -16,9 +18,33 @@ export default function Home() {
   const [checked, setChecked] = useState(0);
   const [total, setTotal] = useState(0);
   const [running, setRunning] = useState(false);
+  const [log, setLog] = useState<LogItem[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+  const lastHeartbeatRef = useRef<number>(0);
 
   const available = useMemo(() => results.filter((item) => item.state === "available").sort((a, b) => b.score - a.score), [results]);
+  const registered = useMemo(() => results.filter((item) => item.state === "registered").length, [results]);
+  const unknown = useMemo(() => results.filter((item) => item.state === "unknown").length, [results]);
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => {
+      if (!lastHeartbeatRef.current) return;
+      if (Date.now() - lastHeartbeatRef.current > 12000) {
+        abortRef.current?.abort();
+        setRunning(false);
+        setStage("watchdog");
+        setStatus("Watchdog zatrzymał zadanie: brak heartbeat przez 12 sekund.");
+        addLog("WATCHDOG: brak heartbeat — zadanie zatrzymane.");
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
+  function addLog(text: string) {
+    const item = { time: new Date().toLocaleTimeString("pl-PL"), text };
+    setLog((current) => [...current, item].slice(-40));
+  }
 
   function toggleTld(tld: string) {
     setSelectedTlds((current) => current.includes(tld) ? current.filter((item) => item !== tld) : [...current, tld]);
@@ -26,10 +52,12 @@ export default function Home() {
 
   function applyEvent(event: StreamEvent) {
     setHeartbeat(event.heartbeat);
+    lastHeartbeatRef.current = Date.parse(event.heartbeat) || Date.now();
     if (event.type === "status") {
       setStage(event.stage);
       setStatus(event.message);
       setProgress(event.progress);
+      addLog(event.message);
     } else if (event.type === "candidate") {
       setStage("availability");
       setResults((current) => [...current, event.result]);
@@ -37,6 +65,7 @@ export default function Home() {
       setTotal(event.total);
       setProgress(25 + Math.round((event.checked / Math.max(1, event.total)) * 70));
       setStatus(`Sprawdzono ${event.checked}/${event.total}: ${event.result.domain}`);
+      addLog(`${event.result.domain} → ${event.result.state.toUpperCase()}`);
     } else if (event.type === "complete") {
       setResults(event.results);
       setChecked(event.checked);
@@ -45,10 +74,12 @@ export default function Home() {
       setProgress(100);
       setStatus(`Gotowe. Sprawdzono ${event.total} domen.`);
       setRunning(false);
+      addLog(`ZAKOŃCZONE: ${event.total} domen.`);
     } else if (event.type === "error") {
       setStage("error");
       setStatus(event.message);
       setRunning(false);
+      addLog(`BŁĄD: ${event.message}`);
     }
   }
 
@@ -57,13 +88,16 @@ export default function Home() {
     if (running || selectedTlds.length === 0) return;
     const abort = new AbortController();
     abortRef.current = abort;
+    lastHeartbeatRef.current = Date.now();
     setResults([]);
+    setLog([]);
     setChecked(0);
     setTotal(0);
     setProgress(2);
     setStage("starting");
     setStatus("Uruchamiam radar…");
     setRunning(true);
+    addLog("START: uruchamiam radar.");
 
     try {
       const response = await fetch("/api/search", {
@@ -89,9 +123,13 @@ export default function Home() {
         }
       }
     } catch (error) {
-      if ((error as Error).name === "AbortError") setStatus("Wyszukiwanie zatrzymane.");
-      else setStatus(error instanceof Error ? error.message : "Błąd wyszukiwania");
-      setStage("error");
+      if ((error as Error).name === "AbortError") {
+        if (stage !== "watchdog") setStatus("Wyszukiwanie zatrzymane.");
+      } else {
+        setStatus(error instanceof Error ? error.message : "Błąd wyszukiwania");
+        addLog(`BŁĄD: ${error instanceof Error ? error.message : "Błąd wyszukiwania"}`);
+      }
+      if (stage !== "watchdog") setStage("error");
       setRunning(false);
     }
   }
@@ -99,6 +137,9 @@ export default function Home() {
   function stop() {
     abortRef.current?.abort();
     setRunning(false);
+    setStage("stopped");
+    setStatus("Wyszukiwanie zatrzymane ręcznie.");
+    addLog("STOP: zatrzymano ręcznie.");
   }
 
   return (
@@ -129,10 +170,17 @@ export default function Home() {
         <div className="monitorHead"><strong>Status: {stage}</strong><span className={running ? "pulse live" : "pulse"}>{running ? "LIVE" : "IDLE"}</span></div>
         <div className="progress"><div style={{ width: `${progress}%` }} /></div>
         <div className="statusLine"><span>{status}</span><span>{progress}%</span></div>
-        <div className="metrics">
+        <div className="metrics four">
           <div><span>Sprawdzone</span><strong>{checked}/{total || "—"}</strong></div>
           <div><span>Dostępne</span><strong>{available.length}</strong></div>
+          <div><span>Zajęte / ?</span><strong>{registered} / {unknown}</strong></div>
           <div><span>Heartbeat</span><strong>{heartbeat ? new Date(heartbeat).toLocaleTimeString("pl-PL") : "—"}</strong></div>
+        </div>
+        <div className="liveLog">
+          <div className="liveLogHead"><strong>Dziennik LIVE</strong><span>{log.length} zdarzeń</span></div>
+          <div className="liveLogBody">
+            {log.length === 0 ? <div className="logEmpty">Brak zdarzeń.</div> : log.slice().reverse().map((item, index) => <div className="logRow" key={`${item.time}-${index}`}><time>{item.time}</time><span>{item.text}</span></div>)}
+          </div>
         </div>
       </section>
 
