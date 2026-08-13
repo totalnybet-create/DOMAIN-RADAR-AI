@@ -1,6 +1,7 @@
 import { generateSmartNames } from "@/lib/ai-naming";
-import { scoreDomain } from "@/lib/naming";
 import { checkDomain } from "@/lib/rdap";
+import { reasonForCandidate, scoreCandidate } from "@/lib/scoring";
+import { clampSettings, type RadarSettings } from "@/lib/settings";
 import type { DomainResult, StreamEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -16,11 +17,11 @@ function frame(event: StreamEvent) {
 }
 
 function cleanLabel(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 18);
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 24);
 }
 
 export async function POST(request: Request) {
-  let body: { prompt?: string; limit?: number; tld?: string; exclude?: string[]; batch?: number };
+  let body: { prompt?: string; limit?: number; tld?: string; exclude?: string[]; batch?: number; settings?: Partial<RadarSettings> };
   try {
     body = await request.json();
   } catch {
@@ -28,15 +29,14 @@ export async function POST(request: Request) {
   }
 
   const prompt = body.prompt?.trim() ?? "";
-  if (prompt.length < 2 || prompt.length > 500) {
-    return Response.json({ error: "Prompt must contain 2-500 characters." }, { status: 400 });
+  if (prompt.length < 1 || prompt.length > 500) {
+    return Response.json({ error: "Prompt must contain 1-500 characters." }, { status: 400 });
   }
 
+  const settings = clampSettings(body.settings);
   const limit = Math.max(10, Math.min(Number(body.limit) || 100, MAX_NAMES));
   const tld = (body.tld || DEFAULT_TLD).replace(/^\./, "").toLowerCase();
-  if (!/^[a-z0-9-]{2,24}$/.test(tld)) {
-    return Response.json({ error: "Invalid TLD" }, { status: 400 });
-  }
+  if (!/^[a-z0-9-]{2,24}$/.test(tld)) return Response.json({ error: "Invalid TLD" }, { status: 400 });
 
   const batch = Math.max(1, Math.min(Number(body.batch) || 1, 5));
   const exclude = Array.from(new Set((body.exclude ?? []).map(cleanLabel).filter(Boolean))).slice(0, 500);
@@ -47,14 +47,14 @@ export async function POST(request: Request) {
       const heartbeat = () => new Date().toISOString();
       let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
       try {
-        send({ type: "status", stage: "analysis", progress: 5, message: `Partia ${batch}/5: analizuję słowo i bliskie warianty dla .${tld}…`, heartbeat: heartbeat() });
-        const generated = await generateSmartNames(prompt, limit, { exclude, tld, batch });
+        send({ type: "status", stage: "analysis", progress: 5, message: `Partia ${batch}/5: analizuję QUERY i promień wyszukiwania dla .${tld}…`, heartbeat: heartbeat() });
+        const generated = await generateSmartNames(prompt, limit, { exclude, tld, batch, settings });
         const names = generated.names.filter((name) => !exclude.includes(name)).slice(0, limit);
         send({
           type: "status",
           stage: "generation",
           progress: 18,
-          message: generated.provider === "openai" ? `AI przygotowało ${names.length} nowych nazw w partii ${batch}.` : `Generator przygotował ${names.length} nowych nazw w partii ${batch}.`,
+          message: `${generated.provider === "openai" ? "AI" : "Silnik lokalny"} (${generated.model}) przygotował ${names.length} nowych nazw — cykl ${batch}/5.`,
           heartbeat: heartbeat(),
         });
 
@@ -64,18 +64,12 @@ export async function POST(request: Request) {
         let nextIndex = 0;
         let lastActivity = Date.now();
 
-        send({ type: "status", stage: "availability", progress: 20, message: `Sprawdzam ${pairs.length} nowych domen .${tld}…`, heartbeat: heartbeat() });
+        send({ type: "status", stage: "availability", progress: 20, message: `Sprawdzam ${pairs.length} domen przez RDAP — bez zgadywania dostępności…`, heartbeat: heartbeat() });
 
         heartbeatTimer = setInterval(() => {
           if (Date.now() - lastActivity < 2500) return;
           const progress = 20 + Math.round((checked / Math.max(1, pairs.length)) * 75);
-          send({
-            type: "status",
-            stage: "availability",
-            progress,
-            message: `Radar działa — partia ${batch}: ${checked}/${pairs.length}.`,
-            heartbeat: heartbeat(),
-          });
+          send({ type: "status", stage: "availability", progress, message: `Radar działa — partia ${batch}: ${checked}/${pairs.length}.`, heartbeat: heartbeat() });
           lastActivity = Date.now();
         }, 1000);
 
@@ -87,12 +81,14 @@ export async function POST(request: Request) {
             const check = await checkDomain(pair.domain);
             checked += 1;
             lastActivity = Date.now();
+            const metrics = scoreCandidate(prompt, pair.label);
             const result: DomainResult = {
               ...pair,
               state: check.state,
               statusCode: check.statusCode,
-              reason: check.reason,
-              score: scoreDomain(pair.label, pair.tld, check.state),
+              ...metrics,
+              sources: [generated.provider === "openai" ? "ai" : "deterministic"],
+              reason: check.reason || reasonForCandidate(prompt, pair.label),
             };
             results.push(result);
             send({ type: "candidate", result, checked, total: pairs.length, heartbeat: heartbeat() });
@@ -100,7 +96,7 @@ export async function POST(request: Request) {
         }
 
         await Promise.all(Array.from({ length: Math.min(CONCURRENCY, Math.max(1, pairs.length)) }, () => worker()));
-        results.sort((a, b) => b.score - a.score || a.domain.localeCompare(b.domain));
+        results.sort((a, b) => b.score - a.score || a.label.length - b.label.length || b.similarity - a.similarity || a.domain.localeCompare(b.domain));
         send({ type: "complete", results, checked, total: pairs.length, heartbeat: heartbeat() });
       } catch (error) {
         send({ type: "error", message: error instanceof Error ? error.message : "Search failed", heartbeat: heartbeat() });
