@@ -1,4 +1,5 @@
-import { generateNames, scoreDomain } from "@/lib/naming";
+import { generateSmartNames } from "@/lib/ai-naming";
+import { scoreDomain } from "@/lib/naming";
 import { checkDomain } from "@/lib/rdap";
 import type { DomainResult, StreamEvent } from "@/lib/types";
 
@@ -40,8 +41,15 @@ export async function POST(request: Request) {
       let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
       try {
         send({ type: "status", stage: "analysis", progress: 8, message: "Analizuję branżę i słownictwo…", heartbeat: heartbeat() });
-        const names = generateNames(prompt, limit);
-        send({ type: "status", stage: "generation", progress: 22, message: `Wygenerowano ${names.length} kandydatów marki.`, heartbeat: heartbeat() });
+        const generated = await generateSmartNames(prompt, limit);
+        const names = generated.names;
+        send({
+          type: "status",
+          stage: "generation",
+          progress: 22,
+          message: generated.provider === "openai" ? `AI wygenerowało ${names.length} kandydatów marki.` : `Generator awaryjny utworzył ${names.length} kandydatów marki.`,
+          heartbeat: heartbeat(),
+        });
 
         const pairs = names
           .flatMap((label) => tlds.map((tld) => ({ label, tld, domain: `${label}.${tld}` })))
