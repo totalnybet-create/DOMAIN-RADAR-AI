@@ -5,7 +5,7 @@ let bootstrapCache: { data: Bootstrap; expiresAt: number } | null = null;
 
 async function getBootstrap(): Promise<Bootstrap> {
   if (bootstrapCache && bootstrapCache.expiresAt > Date.now()) return bootstrapCache.data;
-  const response = await fetch("https://data.iana.org/rdap/dns.json", { next: { revalidate: 86400 } });
+  const response = await fetch("https://data.iana.org/rdap/dns.json", { cache: "no-store" });
   if (!response.ok) throw new Error(`IANA bootstrap failed: ${response.status}`);
   const data = (await response.json()) as Bootstrap;
   bootstrapCache = { data, expiresAt: Date.now() + 24 * 60 * 60 * 1000 };
@@ -16,7 +16,7 @@ async function resolveRdapBase(tld: string): Promise<string | null> {
   const bootstrap = await getBootstrap();
   const normalized = tld.replace(/^\./, "").toLowerCase();
   for (const [tlds, urls] of bootstrap.services) {
-    if (tlds.map((item) => item.toLowerCase()).includes(normalized)) return urls[0] ?? null;
+    if (tlds.some((item) => item.toLowerCase() === normalized)) return urls[0] ?? null;
   }
   return null;
 }
@@ -32,7 +32,7 @@ export async function checkDomain(domain: string): Promise<{ state: DomainState;
     const response = await fetch(url, {
       redirect: "follow",
       headers: { Accept: "application/rdap+json, application/json" },
-      signal: AbortSignal.timeout(6500),
+      signal: AbortSignal.timeout(4500),
       cache: "no-store",
     });
     if (response.status === 404) return { state: "available", statusCode: 404 };
@@ -40,6 +40,7 @@ export async function checkDomain(domain: string): Promise<{ state: DomainState;
     if (response.status === 429) return { state: "unknown", statusCode: 429, reason: "rate-limited" };
     return { state: "unknown", statusCode: response.status, reason: `rdap-${response.status}` };
   } catch (error) {
-    return { state: "unknown", reason: error instanceof Error ? error.message : "rdap-error" };
+    const reason = error instanceof Error ? error.name === "TimeoutError" ? "timeout" : error.message : "rdap-error";
+    return { state: "unknown", reason };
   }
 }
