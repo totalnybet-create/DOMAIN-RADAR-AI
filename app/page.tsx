@@ -21,6 +21,7 @@ export default function Home() {
   const [log, setLog] = useState<LogItem[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const lastHeartbeatRef = useRef<number>(0);
+  const watchdogTriggeredRef = useRef(false);
 
   const available = useMemo(() => results.filter((item) => item.state === "available").sort((a, b) => b.score - a.score), [results]);
   const registered = useMemo(() => results.filter((item) => item.state === "registered").length, [results]);
@@ -31,6 +32,7 @@ export default function Home() {
     const timer = window.setInterval(() => {
       if (!lastHeartbeatRef.current) return;
       if (Date.now() - lastHeartbeatRef.current > 12000) {
+        watchdogTriggeredRef.current = true;
         abortRef.current?.abort();
         setRunning(false);
         setStage("watchdog");
@@ -88,6 +90,7 @@ export default function Home() {
     if (running || selectedTlds.length === 0) return;
     const abort = new AbortController();
     abortRef.current = abort;
+    watchdogTriggeredRef.current = false;
     lastHeartbeatRef.current = Date.now();
     setResults([]);
     setLog([]);
@@ -124,17 +127,22 @@ export default function Home() {
       }
     } catch (error) {
       if ((error as Error).name === "AbortError") {
-        if (stage !== "watchdog") setStatus("Wyszukiwanie zatrzymane.");
+        if (!watchdogTriggeredRef.current) {
+          setStatus("Wyszukiwanie zatrzymane.");
+          setStage("stopped");
+        }
       } else {
-        setStatus(error instanceof Error ? error.message : "Błąd wyszukiwania");
-        addLog(`BŁĄD: ${error instanceof Error ? error.message : "Błąd wyszukiwania"}`);
+        const message = error instanceof Error ? error.message : "Błąd wyszukiwania";
+        setStatus(message);
+        setStage("error");
+        addLog(`BŁĄD: ${message}`);
       }
-      if (stage !== "watchdog") setStage("error");
       setRunning(false);
     }
   }
 
   function stop() {
+    watchdogTriggeredRef.current = false;
     abortRef.current?.abort();
     setRunning(false);
     setStage("stopped");
