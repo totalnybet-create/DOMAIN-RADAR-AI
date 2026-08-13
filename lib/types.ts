@@ -7,6 +7,13 @@ export type DomainResult = {
   state: DomainState;
   statusCode?: number;
   score: number;
+  similarity: number;
+  lengthScore: number;
+  brandScore: number;
+  pronunciationScore: number;
+  memorabilityScore: number;
+  typingScore: number;
+  sources?: string[];
   reason?: string;
 };
 
