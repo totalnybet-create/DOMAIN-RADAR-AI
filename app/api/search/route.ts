@@ -1,6 +1,6 @@
-import { generateSmartNames } from "@/lib/ai-naming";
+import { generateContextAwareNames, isBusinessBrief } from "@/lib/conversational-naming";
+import { reasonForContextualCandidate, scoreContextualCandidate } from "@/lib/contextual-scoring";
 import { checkDomain } from "@/lib/rdap";
-import { reasonForCandidate, scoreCandidate } from "@/lib/scoring";
 import { clampSettings, type RadarSettings } from "@/lib/settings";
 import type { DomainResult, StreamEvent } from "@/lib/types";
 
@@ -47,14 +47,24 @@ export async function POST(request: Request) {
       const heartbeat = () => new Date().toISOString();
       let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
       try {
-        send({ type: "status", stage: "analysis", progress: 5, message: `Partia ${batch}/5: analizuję QUERY i promień wyszukiwania dla .${tld}…`, heartbeat: heartbeat() });
-        const generated = await generateSmartNames(prompt, limit, { exclude, tld, batch, settings });
+        const semanticMode = isBusinessBrief(prompt);
+        send({
+          type: "status",
+          stage: "analysis",
+          progress: 5,
+          message: semanticMode
+            ? `Partia ${batch}/5: rozumiem branżę, klientów i skojarzenia biznesowe dla .${tld}…`
+            : `Partia ${batch}/5: analizuję QUERY i promień wyszukiwania dla .${tld}…`,
+          heartbeat: heartbeat(),
+        });
+
+        const generated = await generateContextAwareNames(prompt, limit, { exclude, tld, batch, settings });
         const names = generated.names.filter((name) => !exclude.includes(name)).slice(0, limit);
         send({
           type: "status",
           stage: "generation",
           progress: 18,
-          message: `${generated.provider === "openai" ? "AI" : "Silnik lokalny"} (${generated.model}) przygotował ${names.length} nowych nazw — cykl ${batch}/5.`,
+          message: `${generated.provider === "openai" ? "AI" : "Silnik lokalny"} (${generated.model}) przygotował ${names.length} nowych nazw · tryb ${generated.mode === "business-brief" ? "BRANŻOWY" : "RADAR"} · cykl ${batch}/5.`,
           heartbeat: heartbeat(),
         });
 
@@ -81,14 +91,14 @@ export async function POST(request: Request) {
             const check = await checkDomain(pair.domain);
             checked += 1;
             lastActivity = Date.now();
-            const metrics = scoreCandidate(prompt, pair.label);
+            const metrics = scoreContextualCandidate(prompt, pair.label);
             const result: DomainResult = {
               ...pair,
               state: check.state,
               statusCode: check.statusCode,
               ...metrics,
               sources: [generated.provider === "openai" ? "ai" : "deterministic"],
-              reason: check.reason || reasonForCandidate(prompt, pair.label),
+              reason: check.reason || reasonForContextualCandidate(prompt, pair.label),
             };
             results.push(result);
             send({ type: "candidate", result, checked, total: pairs.length, heartbeat: heartbeat() });
