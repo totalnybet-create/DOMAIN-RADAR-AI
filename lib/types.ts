@@ -22,6 +22,8 @@ export type DomainResult = {
   renewalPrice?: number;
   transferPrice?: number;
   retailPrice?: number;
+  renewalRetailPrice?: number;
+  transferRetailPrice?: number;
 };
 
 export type StreamEvent =
