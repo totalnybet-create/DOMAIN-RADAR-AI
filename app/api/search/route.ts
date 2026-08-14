@@ -1,5 +1,6 @@
 import { generateSmartNames } from "@/lib/ai-naming";
-import { isDynadotConfigured, searchDynadotDomains } from "@/lib/dynadot";
+import { plFallbackPricing, usdToPlnRate } from "@/lib/domain-commerce";
+import { calculateRetailPrice, isDynadotConfigured, searchDynadotDomains } from "@/lib/dynadot";
 import { checkDomain } from "@/lib/rdap";
 import { reasonForCandidate, scoreCandidate } from "@/lib/scoring";
 import { clampSettings, type RadarSettings } from "@/lib/settings";
@@ -19,6 +20,10 @@ function frame(event: StreamEvent) {
 
 function cleanLabel(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 24);
+}
+
+function roundMoney(value: number) {
+  return Math.round(value * 100) / 100;
 }
 
 export async function POST(request: Request) {
@@ -107,6 +112,10 @@ export async function POST(request: Request) {
           }
         }
 
+        const needsUsdConversion = Array.from(dynadotResults.values()).some((item) => item.price?.currency?.toUpperCase() === "USD");
+        const usdPln = needsUsdConversion ? await usdToPlnRate() : 1;
+        const plFallback = tld === "pl" ? await plFallbackPricing() : null;
+
         async function worker() {
           while (true) {
             const index = nextIndex++;
@@ -117,6 +126,30 @@ export async function POST(request: Request) {
             checked += 1;
             lastActivity = Date.now();
             const metrics = scoreCandidate(prompt, pair.label);
+
+            const sourceCurrency = dynadot?.price?.currency?.toUpperCase() || "PLN";
+            const conversion = sourceCurrency === "USD" ? usdPln : 1;
+            let registrationPrice = dynadot?.price?.registrationPrice;
+            let renewalPrice = dynadot?.price?.renewalPrice;
+            let transferPrice = dynadot?.price?.transferPrice;
+            let priceUnit = dynadot?.price?.unit;
+
+            if (registrationPrice !== undefined && (sourceCurrency === "PLN" || sourceCurrency === "USD")) registrationPrice = roundMoney(registrationPrice * conversion);
+            if (renewalPrice !== undefined && (sourceCurrency === "PLN" || sourceCurrency === "USD")) renewalPrice = roundMoney(renewalPrice * conversion);
+            if (transferPrice !== undefined && (sourceCurrency === "PLN" || sourceCurrency === "USD")) transferPrice = roundMoney(transferPrice * conversion);
+
+            if (pair.tld === "pl" && plFallback && registrationPrice === undefined) {
+              registrationPrice = plFallback.registrationPrice;
+              renewalPrice = plFallback.renewalPrice;
+              transferPrice = plFallback.transferPrice;
+              priceUnit = plFallback.unit;
+            }
+
+            const canPriceInPln = sourceCurrency === "PLN" || sourceCurrency === "USD" || pair.tld === "pl";
+            const retailPrice = canPriceInPln ? calculateRetailPrice(registrationPrice) : undefined;
+            const renewalRetailPrice = canPriceInPln ? calculateRetailPrice(renewalPrice) : undefined;
+            const transferRetailPrice = canPriceInPln ? calculateRetailPrice(transferPrice) : undefined;
+
             const result: DomainResult = {
               ...pair,
               state: dynadot?.state ?? fallback?.state ?? "unknown",
@@ -125,12 +158,14 @@ export async function POST(request: Request) {
               sources: [generated.provider === "openai" ? "ai" : "deterministic", dynadot ? "dynadot" : "rdap"],
               reason: dynadot?.detailsError || fallback?.reason || reasonForCandidate(prompt, pair.label),
               premium: dynadot?.premium,
-              currency: dynadot?.price?.currency,
-              priceUnit: dynadot?.price?.unit,
-              registrationPrice: dynadot?.price?.registrationPrice,
-              renewalPrice: dynadot?.price?.renewalPrice,
-              transferPrice: dynadot?.price?.transferPrice,
-              retailPrice: dynadot?.retailPrice,
+              currency: canPriceInPln && registrationPrice !== undefined ? "PLN" : dynadot?.price?.currency,
+              priceUnit,
+              registrationPrice,
+              renewalPrice,
+              transferPrice,
+              retailPrice,
+              renewalRetailPrice,
+              transferRetailPrice,
             };
             results.push(result);
             send({ type: "candidate", result, checked, total: pairs.length, heartbeat: heartbeat() });
