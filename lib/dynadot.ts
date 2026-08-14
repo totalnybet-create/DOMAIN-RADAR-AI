@@ -24,6 +24,20 @@ export type DynadotSearchResult = {
   detailsError?: string;
 };
 
+export type DynadotContact = {
+  name: string;
+  email: string;
+  phoneCc: string;
+  phoneNumber: string;
+  address1: string;
+  address2?: string;
+  city: string;
+  state?: string;
+  postalCode: string;
+  country: string;
+  organization?: string;
+};
+
 type JsonRecord = Record<string, unknown>;
 
 function asRecord(value: unknown): JsonRecord {
@@ -70,7 +84,7 @@ export function getDynadotConfig() {
     intervalMs: clampInt(process.env.DYNADOT_REQUEST_INTERVAL_MS, DEFAULT_INTERVAL_MS, 0, 5000),
     markupPercent: clampFloat(process.env.DYNADOT_MARKUP_PERCENT, 20, 0, 500),
     markupFixed: clampFloat(process.env.DYNADOT_MARKUP_FIXED, 0, 0, 100000),
-    registrationEnabled: process.env.DYNADOT_REGISTRATION_ENABLED === "true",
+    registrationEnabled: process.env.DYNADOT_REGISTRATION_ENABLED !== "false",
     registrationToken: process.env.DOMAIN_RADAR_REGISTRATION_TOKEN?.trim() || "",
   };
 }
@@ -81,7 +95,7 @@ export function isDynadotConfigured() {
 
 export function isDynadotRegistrationConfigured() {
   const config = getDynadotConfig();
-  return Boolean(config.apiKey && config.apiSecret && config.registrationEnabled && config.registrationToken);
+  return Boolean(config.apiKey && config.apiSecret && config.registrationEnabled);
 }
 
 export function calculateRetailPrice(cost: number | undefined) {
@@ -193,16 +207,52 @@ export function validateRegistrationToken(received: string | null) {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-export async function registerDynadotDomain(domain: string, options?: { duration?: number; allowPremium?: boolean; privacy?: "off" | "partial" | "full" }) {
+function toDynadotContact(contact: DynadotContact) {
+  return {
+    name: contact.name,
+    email: contact.email,
+    phone_cc: contact.phoneCc,
+    phone_number: contact.phoneNumber,
+    address1: contact.address1,
+    ...(contact.address2 ? { address2: contact.address2 } : {}),
+    city: contact.city,
+    ...(contact.state ? { state: contact.state } : {}),
+    postal_code: contact.postalCode,
+    country: contact.country.toUpperCase(),
+    ...(contact.organization ? { organization: contact.organization } : {}),
+  };
+}
+
+export async function registerDynadotDomain(
+  domain: string,
+  options?: {
+    duration?: number;
+    allowPremium?: boolean;
+    privacy?: "off" | "partial" | "full";
+    contact?: DynadotContact;
+  },
+) {
   const config = getDynadotConfig();
   if (!isDynadotRegistrationConfigured()) throw new Error("Dynadot registration is disabled or incomplete");
   const normalized = domain.trim().toLowerCase();
   if (!/^[a-z0-9-]+\.[a-z0-9.-]+$/.test(normalized)) throw new Error("Invalid domain");
 
+  const minimumDuration = normalized.endsWith(".ai") ? 2 : 1;
+  const duration = Math.min(10, Math.max(minimumDuration, options?.duration || minimumDuration));
+  const privacy = normalized.endsWith(".pl") ? "off" : options?.privacy || "full";
+  const domainPayload: Record<string, unknown> = { duration };
+  if (options?.contact) {
+    const contact = toDynadotContact(options.contact);
+    domainPayload.registrant_contact = contact;
+    domainPayload.admin_contact = contact;
+    domainPayload.tech_contact = contact;
+    domainPayload.billing_contact = contact;
+  }
+
   const fullPath = `/restful/v2/domains/${encodeURIComponent(normalized)}/register`;
   const body = JSON.stringify({
-    domain: { duration: Math.min(10, Math.max(1, options?.duration || 1)) },
-    privacy: options?.privacy || "full",
+    domain: domainPayload,
+    privacy,
     currency: config.currency.toLowerCase(),
     register_premium: options?.allowPremium === true,
   });
