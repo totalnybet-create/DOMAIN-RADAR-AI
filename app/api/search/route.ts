@@ -1,4 +1,5 @@
 import { generateSmartNames } from "@/lib/ai-naming";
+import { isDynadotConfigured, searchDynadotDomains } from "@/lib/dynadot";
 import { checkDomain } from "@/lib/rdap";
 import { reasonForCandidate, scoreCandidate } from "@/lib/scoring";
 import { clampSettings, type RadarSettings } from "@/lib/settings";
@@ -64,7 +65,16 @@ export async function POST(request: Request) {
         let nextIndex = 0;
         let lastActivity = Date.now();
 
-        send({ type: "status", stage: "availability", progress: 20, message: `Sprawdzam ${pairs.length} domen przez RDAP — bez zgadywania dostępności…`, heartbeat: heartbeat() });
+        const dynadotEnabled = isDynadotConfigured();
+        send({
+          type: "status",
+          stage: "availability",
+          progress: 20,
+          message: dynadotEnabled
+            ? `Sprawdzam ${pairs.length} domen przez Dynadot LIVE — dostępność i ceny z konta…`
+            : `Sprawdzam ${pairs.length} domen przez RDAP — Dynadot czeka na klucz API…`,
+          heartbeat: heartbeat(),
+        });
 
         heartbeatTimer = setInterval(() => {
           if (Date.now() - lastActivity < 2500) return;
@@ -73,22 +83,54 @@ export async function POST(request: Request) {
           lastActivity = Date.now();
         }, 1000);
 
+        let dynadotResults = new Map<string, Awaited<ReturnType<typeof searchDynadotDomains>> extends Map<string, infer T> ? T : never>();
+        if (dynadotEnabled) {
+          try {
+            dynadotResults = await searchDynadotDomains(pairs.map((pair) => pair.domain));
+            lastActivity = Date.now();
+            send({
+              type: "status",
+              stage: "availability",
+              progress: 28,
+              message: `Dynadot LIVE odpowiedział dla ${dynadotResults.size}/${pairs.length} domen. Braki sprawdzę przez RDAP.`,
+              heartbeat: heartbeat(),
+            });
+          } catch (error) {
+            lastActivity = Date.now();
+            send({
+              type: "status",
+              stage: "availability",
+              progress: 24,
+              message: `Dynadot niedostępny (${error instanceof Error ? error.message.slice(0, 90) : "błąd API"}) — przełączam na RDAP.`,
+              heartbeat: heartbeat(),
+            });
+          }
+        }
+
         async function worker() {
           while (true) {
             const index = nextIndex++;
             if (index >= pairs.length) return;
             const pair = pairs[index];
-            const check = await checkDomain(pair.domain);
+            const dynadot = dynadotResults.get(pair.domain);
+            const fallback = dynadot ? null : await checkDomain(pair.domain);
             checked += 1;
             lastActivity = Date.now();
             const metrics = scoreCandidate(prompt, pair.label);
             const result: DomainResult = {
               ...pair,
-              state: check.state,
-              statusCode: check.statusCode,
+              state: dynadot?.state ?? fallback?.state ?? "unknown",
+              statusCode: fallback?.statusCode,
               ...metrics,
-              sources: [generated.provider === "openai" ? "ai" : "deterministic"],
-              reason: check.reason || reasonForCandidate(prompt, pair.label),
+              sources: [generated.provider === "openai" ? "ai" : "deterministic", dynadot ? "dynadot" : "rdap"],
+              reason: dynadot?.detailsError || fallback?.reason || reasonForCandidate(prompt, pair.label),
+              premium: dynadot?.premium,
+              currency: dynadot?.price?.currency,
+              priceUnit: dynadot?.price?.unit,
+              registrationPrice: dynadot?.price?.registrationPrice,
+              renewalPrice: dynadot?.price?.renewalPrice,
+              transferPrice: dynadot?.price?.transferPrice,
+              retailPrice: dynadot?.retailPrice,
             };
             results.push(result);
             send({ type: "candidate", result, checked, total: pairs.length, heartbeat: heartbeat() });
