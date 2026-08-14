@@ -15,6 +15,13 @@ export type DomainResult = {
   typingScore: number;
   sources?: string[];
   reason?: string;
+  premium?: boolean;
+  currency?: string;
+  priceUnit?: string;
+  registrationPrice?: number;
+  renewalPrice?: number;
+  transferPrice?: number;
+  retailPrice?: number;
 };
 
 export type StreamEvent =
