@@ -15,3 +15,5 @@ Next.js application with server-side API routes. Domain checks use the IANA RDAP
 
 ## Status
 Initial production-oriented scaffold in progress.
+
+<!-- redeploy: refresh Dynadot production environment -->
