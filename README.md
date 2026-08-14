@@ -9,4 +9,4 @@ AI-assisted domain and brand discovery platform.
 - Display registrar-backed pricing.
 - Support customer-facing domain search and purchase flows.
 
-<!-- deployment refresh: Dynadot production credentials updated 2026-08-14 -->
+<!-- deployment refresh: Dynadot credentials updated 2026-08-14 15:27 CEST -->
