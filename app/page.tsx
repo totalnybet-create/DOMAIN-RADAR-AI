@@ -31,6 +31,15 @@ function parseExpected(value: string) {
   return Array.from(new Set(value.split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean))).slice(0, 30);
 }
 
+function money(value: number | undefined, currency = "PLN") {
+  if (value === undefined) return "Cena do sprawdzenia";
+  try {
+    return new Intl.NumberFormat("pl-PL", { style: "currency", currency, maximumFractionDigits: 2 }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${currency}`;
+  }
+}
+
 export default function Home() {
   const [prompt, setPrompt] = useState("Labuco");
   const [selectedTld, setSelectedTld] = useState("pl");
@@ -47,6 +56,8 @@ export default function Home() {
   const [batch, setBatch] = useState(0);
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<LogItem[]>([]);
+  const [buyingDomain, setBuyingDomain] = useState<string | null>(null);
+  const [buyError, setBuyError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
   const lastHeartbeatRef = useRef<number>(0);
   const watchdogTriggeredRef = useRef(false);
@@ -137,13 +148,39 @@ export default function Home() {
   }
 
   function appendResult(result: DomainResult) {
-    if (resultsRef.current.some((item) => item.domain === result.domain)) return;
-    resultsRef.current = [...resultsRef.current, result].slice(0, 500);
+    const existingIndex = resultsRef.current.findIndex((item) => item.domain === result.domain);
+    if (existingIndex >= 0) {
+      const next = [...resultsRef.current];
+      next[existingIndex] = result;
+      resultsRef.current = next;
+    } else {
+      resultsRef.current = [...resultsRef.current, result].slice(0, 500);
+    }
     setResults(resultsRef.current);
   }
 
   function updateSettings(patch: Partial<RadarSettings>) {
     setSettings((current) => ({ ...current, ...patch }));
+  }
+
+  async function buyDomain(item: DomainResult) {
+    if (item.state !== "available" || buyingDomain) return;
+    setBuyingDomain(item.domain);
+    setBuyError("");
+    try {
+      const response = await fetch("/api/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain: item.domain }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.url) throw new Error(payload.error || "Nie udało się rozpocząć płatności.");
+      window.location.assign(payload.url);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Nie udało się rozpocząć płatności.";
+      setBuyError(`${item.domain}: ${message}`);
+      setBuyingDomain(null);
+    }
   }
 
   async function startSearch(event?: FormEvent) {
@@ -256,14 +293,15 @@ export default function Home() {
     setStage("idle");
     setStatus("RESET — możesz zacząć od pierwszej setki.");
     setLog([]);
+    setBuyError("");
   }
 
   return (
     <main className="shell">
       <section className="hero">
-        <div className="eyebrow">DOMAIN / BRAND INTELLIGENCE</div>
+        <div className="eyebrow">DOMAIN / BRAND INTELLIGENCE · LIVE PRICING</div>
         <h1>Domain Radar AI</h1>
-        <p>SEARCH DEEPER — NEVER REPEAT. Wpisz nawet jedną literę. Radar zaczyna od najkrótszych i najbliższych nazw, a każda kolejna setka rozszerza promień.</p>
+        <p>Wpisz nawet jedną literę. Radar generuje do 500 nowych nazw, sprawdza dostępność i pokazuje cenę zakupu. Dostępną domenę możesz od razu opłacić i zarejestrować.</p>
       </section>
 
       <section className="card searchCard">
@@ -294,7 +332,7 @@ export default function Home() {
 
               <label className="expectedField"><span>EXPECTED / OCZEKIWANE — pozytywne przykłady</span><textarea value={expectedText} onChange={(e) => setExpectedText(e.target.value)} placeholder="np. labu, labo, labko, labio" /></label>
               <label className="toggleLine"><input type="checkbox" checked={settings.onlyAvailable} onChange={(e) => updateSettings({ onlyAvailable: e.target.checked })} /><span>Pokazuj w pełnej liście tylko dostępne</span></label>
-              <div className="advancedHint">Cyfry: OFF · myślniki: OFF · dostępność zawsze sprawdzana przez RDAP · AUTO: Luna w cyklach 1–3, Terra w 4, Sol w 5.</div>
+              <div className="advancedHint">Cyfry: OFF · myślniki: OFF · Dynadot LIVE: dostępność + ceny · RDAP: awaryjna weryfikacja dostępności · AUTO: Luna w cyklach 1–3, Terra w 4, Sol w 5.</div>
             </div>
           )}
 
@@ -311,6 +349,8 @@ export default function Home() {
         </form>
       </section>
 
+      {buyError && <div className="purchaseError">{buyError}</div>}
+
       <section className="card monitor">
         <div className="monitorHead"><strong>Status: {stage}</strong><span className={running ? "pulse live" : "pulse"}>{running ? "LIVE" : "IDLE"}</span></div>
         <div className="progress"><div style={{ width: `${progress}%` }} /></div>
@@ -321,12 +361,46 @@ export default function Home() {
 
       <section className="results">
         <div className="resultsHead"><h2>Najmocniejsze dostępne domeny</h2><span>{available.length} dostępnych</span></div>
-        {available.length === 0 ? <div className="empty">Dostępne domeny pojawią się tutaj podczas skanowania.</div> : <div className="grid">{available.slice(0, 60).map((item, index) => <article className="domainCard" key={item.domain}><span className="rank">#{index + 1} · {item.label.length} zn.</span><h3>{item.domain}</h3><div className="scoreRow"><span>Domain <strong>{item.score}</strong></span><span>Similarity <strong>{item.similarity}</strong></span><span>Brand <strong>{item.brandScore}</strong></span></div><p className="reason">{item.reason}</p><span className="available">DOSTĘPNA</span></article>)}</div>}
+        {available.length === 0 ? <div className="empty">Dostępne domeny z cenami pojawią się tutaj podczas skanowania.</div> : (
+          <div className="grid">
+            {available.slice(0, 60).map((item, index) => (
+              <article className="domainCard" key={item.domain}>
+                <span className="rank">#{index + 1} · {item.label.length} zn.{item.premium ? " · PREMIUM" : ""}</span>
+                <h3>{item.domain}</h3>
+                <div className="scoreRow"><span>Domain <strong>{item.score}</strong></span><span>Similarity <strong>{item.similarity}</strong></span><span>Brand <strong>{item.brandScore}</strong></span></div>
+                <p className="reason">{item.reason}</p>
+                <div className="domainPrice">
+                  <span>Cena zakupu</span>
+                  <strong>{money(item.retailPrice, item.currency || "PLN")}</strong>
+                  {item.renewalRetailPrice !== undefined && <small>Odnowienie: {money(item.renewalRetailPrice, item.currency || "PLN")}</small>}
+                </div>
+                <div className="domainPurchaseRow">
+                  <span className="available">DOSTĘPNA</span>
+                  <button type="button" className="buyButton" onClick={() => buyDomain(item)} disabled={Boolean(buyingDomain)}>
+                    {buyingDomain === item.domain ? "Przechodzę do płatności…" : "Kup domenę"}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="results allResults">
         <div className="resultsHead"><h2>FOUND / wszystkie sprawdzone</h2><span>{allSorted.length}/{results.length}</span></div>
-        {allSorted.length === 0 ? <div className="empty">Pierwsza partia zawiera do 100 nowych nazw.</div> : <div className="compactGrid">{allSorted.map((item) => <article className="miniDomain" key={`all-${item.domain}`}><div className="miniMain"><strong>{item.domain}</strong><small>{item.label.length} zn. · score {item.score} · sim {item.similarity}</small></div><span className={`stateBadge ${item.state}`}>{item.state === "available" ? "wolna" : item.state === "registered" ? "zajęta" : "?"}</span></article>)}</div>}
+        {allSorted.length === 0 ? <div className="empty">Pierwsza partia zawiera do 100 nowych nazw.</div> : (
+          <div className="compactGrid">
+            {allSorted.map((item) => (
+              <article className="miniDomain" key={`all-${item.domain}`}>
+                <div className="miniMain">
+                  <strong>{item.domain}</strong>
+                  <small>{item.label.length} zn. · score {item.score} · sim {item.similarity}{item.state === "available" && item.retailPrice !== undefined ? ` · ${money(item.retailPrice, item.currency || "PLN")}` : ""}</small>
+                </div>
+                <span className={`stateBadge ${item.state}`}>{item.state === "available" ? "wolna" : item.state === "registered" ? "zajęta" : "?"}</span>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
     </main>
   );
