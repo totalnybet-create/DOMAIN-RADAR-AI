@@ -68,7 +68,7 @@ export function getDynadotConfig() {
     currency: (process.env.DYNADOT_CURRENCY?.trim() || DEFAULT_CURRENCY).toUpperCase(),
     bulkSize: clampInt(process.env.DYNADOT_BULK_SIZE, DEFAULT_BULK_SIZE, 1, 20),
     intervalMs: clampInt(process.env.DYNADOT_REQUEST_INTERVAL_MS, DEFAULT_INTERVAL_MS, 0, 5000),
-    markupPercent: clampFloat(process.env.DYNADOT_MARKUP_PERCENT, 20, 0, 500),
+    markupPercent: clampFloat(process.env.DYNADOT_MARKUP_PERCENT, 0, 0, 500),
     markupFixed: clampFloat(process.env.DYNADOT_MARKUP_FIXED, 0, 0, 100000),
     registrationEnabled: process.env.DYNADOT_REGISTRATION_ENABLED === "true",
     registrationToken: process.env.DOMAIN_RADAR_REGISTRATION_TOKEN?.trim() || "",
