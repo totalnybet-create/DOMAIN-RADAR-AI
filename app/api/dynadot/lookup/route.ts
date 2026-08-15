@@ -1,7 +1,7 @@
 import { getDynadotConfig, isDynadotConfigured, searchDynadotDomains } from "@/lib/dynadot";
 import { checkDomain } from "@/lib/rdap";
 export const runtime="nodejs";export const maxDuration=30;
-const DEFAULT_TLDS=["pl","com","eu","online","shop"];const ALLOWED_TLDS=new Set(["pl","com","eu","io","ai","net","org","co","de","cz","shop","store","online","top"]);
+const DEFAULT_TLDS=["pl","com","eu","online","shop"];const ALLOWED_TLDS=new Set(["pl","com","eu","io","ai","net","org","co","de","cz","shop","store","online","top","vip"]);
 function cleanLabel(value:string){return value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim().replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\..*$/,"").replace(/[^a-z0-9-]/g,"").replace(/^-+|-+$/g,"").slice(0,63)}
 function configuredPlPrice(kind:"registration"|"renewal"){const raw=kind==="registration"?process.env.DYNADOT_PL_REGISTRATION_PRICE:process.env.DYNADOT_PL_RENEWAL_PRICE;const value=Number.parseFloat(raw||"");return Number.isFinite(value)?value:undefined}
 async function usdToPln(){const fallback=Number.parseFloat(process.env.DYNADOT_USD_PLN_RATE||"4");try{const r=await fetch("https://api.nbp.pl/api/exchangerates/rates/a/usd/?format=json",{cache:"no-store",signal:AbortSignal.timeout(2500)});const p=await r.json();const rate=Number(p?.rates?.[0]?.mid);return Number.isFinite(rate)?rate:fallback}catch{return fallback}}
