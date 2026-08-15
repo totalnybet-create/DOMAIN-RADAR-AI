@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import BottomNav from "./BottomNav";
 import "./globals.css";
+import "./mobile-nav.css";
 
 export const metadata: Metadata = {
   title: {
@@ -13,7 +15,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <html lang="pl">
-      <body>{children}</body>
+      <body>
+        {children}
+        <BottomNav />
+      </body>
     </html>
   );
 }
