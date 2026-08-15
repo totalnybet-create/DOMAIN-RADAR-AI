@@ -24,6 +24,8 @@ jobs:
           cache-dependency-path: package.json
       - name: Install
         run: npm install --no-audit --no-fund
+      - name: PL Sniper tests
+        run: npm run test:sniper
       - name: Typecheck
         run: npm run typecheck
       - name: Build
