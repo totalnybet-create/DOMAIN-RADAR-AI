@@ -12,8 +12,33 @@ type Result = {
   detailsError?: string;
 };
 
+type ContactForm = {
+  name: string;
+  email: string;
+  phoneCc: string;
+  phoneNumber: string;
+  address1: string;
+  address2: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  country: string;
+};
+
 const TLD_OPTIONS = ["pl", "com", "eu", "online", "shop", "store", "de", "cz", "net", "org", "io", "ai", "co"];
 const DEFAULT_TLDS = ["pl", "com", "eu", "online", "shop"];
+const EMPTY_CONTACT: ContactForm = {
+  name: "",
+  email: "",
+  phoneCc: "48",
+  phoneNumber: "",
+  address1: "",
+  address2: "",
+  city: "",
+  state: "",
+  postalCode: "",
+  country: "PL",
+};
 
 function money(value: number | undefined, currency = "PLN") {
   if (value === undefined) return "Cena po sprawdzeniu";
@@ -34,6 +59,8 @@ export default function DomainsStorefront() {
   const [results, setResults] = useState<Result[]>([]);
   const [loading, setLoading] = useState(false);
   const [buyingDomain, setBuyingDomain] = useState<string | null>(null);
+  const [pendingDomain, setPendingDomain] = useState<string | null>(null);
+  const [contact, setContact] = useState<ContactForm>(EMPTY_CONTACT);
   const [error, setError] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
@@ -72,23 +99,39 @@ export default function DomainsStorefront() {
     }
   }
 
-  async function buyDomain(domain: string) {
-    if (buyingDomain) return;
+  async function startCheckout(domain: string, contactData?: ContactForm) {
+    if (buyingDomain && buyingDomain !== domain) return;
     setBuyingDomain(domain);
     setError("");
     try {
       const response = await fetch("/api/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain }),
+        body: JSON.stringify({ domain, ...(contactData ? { contact: contactData } : {}) }),
       });
       const payload = await response.json();
+      if (payload.requiresContact) {
+        setPendingDomain(domain);
+        setBuyingDomain(null);
+        return;
+      }
       if (!response.ok || !payload.url) throw new Error(payload.error || "Nie udało się rozpocząć płatności.");
       window.location.href = payload.url;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Błąd płatności.");
       setBuyingDomain(null);
     }
+  }
+
+  async function submitContact(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!pendingDomain || buyingDomain) return;
+    await startCheckout(pendingDomain, contact);
+  }
+
+  function closeContact() {
+    if (buyingDomain) return;
+    setPendingDomain(null);
   }
 
   function travelSearch(event: FormEvent<HTMLFormElement>) {
@@ -218,7 +261,7 @@ export default function DomainsStorefront() {
                     <button
                       className={styles.buyButton}
                       type="button"
-                      onClick={() => buyDomain(item.domain)}
+                      onClick={() => startCheckout(item.domain)}
                       disabled={Boolean(buyingDomain)}
                     >
                       {buyingDomain === item.domain ? "Przechodzę do płatności…" : "Kup domenę"}
@@ -284,9 +327,37 @@ export default function DomainsStorefront() {
         <footer className={styles.footer}>
           <a className={styles.brand} href="#top">Domena<span>Go</span></a>
           <p>Wyszukiwarka domen i narzędzia do startu online.</p>
-          <a href="/" className={styles.footerLink}>Powered by Domain Radar AI</a>
+          <a href="/radar" className={styles.footerLink}>Powered by Domain Radar AI</a>
         </footer>
       </div>
+
+      {pendingDomain && (
+        <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeContact()}>
+          <section className={styles.contactModal} role="dialog" aria-modal="true" aria-labelledby="contact-title">
+            <button className={styles.modalClose} type="button" onClick={closeContact} aria-label="Zamknij">×</button>
+            <span className={styles.sectionEyebrow}>DANE WŁAŚCICIELA DOMENY</span>
+            <h2 id="contact-title">Dokończ zakup {pendingDomain}</h2>
+            <p>Dane są potrzebne rejestratorowi do zapisania domeny na właściwego właściciela.</p>
+            <form className={styles.contactForm} onSubmit={submitContact}>
+              <label className={styles.fullField}>Imię i nazwisko / nazwa właściciela<input required autoComplete="name" value={contact.name} onChange={(e) => setContact({ ...contact, name: e.target.value })} /></label>
+              <label>E-mail<input required type="email" autoComplete="email" value={contact.email} onChange={(e) => setContact({ ...contact, email: e.target.value })} /></label>
+              <div className={styles.phoneFields}>
+                <label>Kierunkowy<input required inputMode="numeric" value={contact.phoneCc} onChange={(e) => setContact({ ...contact, phoneCc: e.target.value })} /></label>
+                <label>Telefon<input required inputMode="tel" autoComplete="tel" value={contact.phoneNumber} onChange={(e) => setContact({ ...contact, phoneNumber: e.target.value })} /></label>
+              </div>
+              <label className={styles.fullField}>Adres<input required autoComplete="street-address" value={contact.address1} onChange={(e) => setContact({ ...contact, address1: e.target.value })} /></label>
+              <label className={styles.fullField}>Adres — dodatkowe informacje<input value={contact.address2} onChange={(e) => setContact({ ...contact, address2: e.target.value })} /></label>
+              <label>Miasto<input required autoComplete="address-level2" value={contact.city} onChange={(e) => setContact({ ...contact, city: e.target.value })} /></label>
+              <label>Kod pocztowy<input required autoComplete="postal-code" value={contact.postalCode} onChange={(e) => setContact({ ...contact, postalCode: e.target.value })} /></label>
+              <label>Województwo / region<input autoComplete="address-level1" value={contact.state} onChange={(e) => setContact({ ...contact, state: e.target.value })} /></label>
+              <label>Kraj (kod 2-literowy)<input required maxLength={2} autoComplete="country" value={contact.country} onChange={(e) => setContact({ ...contact, country: e.target.value.toUpperCase() })} /></label>
+              <button className={styles.contactSubmit} disabled={Boolean(buyingDomain)}>
+                {buyingDomain ? "Przygotowuję płatność…" : "Przejdź do bezpiecznej płatności"}
+              </button>
+            </form>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
