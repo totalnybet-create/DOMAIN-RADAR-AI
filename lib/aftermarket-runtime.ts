@@ -128,7 +128,7 @@ export async function listPlAuctionsRuntime(
     size?: number;
     start?: number;
     maxLength?: number;
-    maxPrice?: number;
+    maxPrice?: number | null;
     qualityPrefilter?: boolean;
     order?: "name" | "endtime" | "price" | "offers" | "length" | "views";
   },
@@ -137,7 +137,7 @@ export async function listPlAuctionsRuntime(
   const requestedSize = Math.min(5000, Math.max(1, options?.size || 500));
   const perKind = Math.min(1250, Math.max(100, Math.ceil(requestedSize / 4)));
   const maxLength = Math.min(30, Math.max(3, options?.maxLength || 14));
-  const maxPrice = Math.max(1, options?.maxPrice || config.maxDomainPrice);
+  const maxPrice = options?.maxPrice === null ? null : Math.max(1, options?.maxPrice || config.maxDomainPrice);
   const globalStart = Math.max(0, Math.floor(options?.start || 0));
   const perKindStart = Math.floor(globalStart / 4);
   const qualityPrefilter = options?.qualityPrefilter !== false;
@@ -148,7 +148,7 @@ export async function listPlAuctionsRuntime(
     { what: 5, kind: "cheap" as const },
   ];
 
-  const groups = await Promise.all(
+  const settled = await Promise.allSettled(
     kinds.map(async ({ what, kind }) => {
       const items = await callAftermarket<MarketAuction[]>(credentials, "/listing/list", {
         tld: "pl",
@@ -158,7 +158,7 @@ export async function listPlAuctionsRuntime(
         noIDN: true,
         lengthFrom: 2,
         lengthTo: maxLength,
-        priceTo: maxPrice,
+        ...(maxPrice === null ? {} : { priceTo: maxPrice }),
         currency: "PLN",
         order: options?.order || "price",
         size: perKind,
@@ -167,6 +167,25 @@ export async function listPlAuctionsRuntime(
       return items.map((item) => ({ ...item, auctionKind: kind }));
     }),
   );
+
+  const groups: MarketAuction[][] = [];
+  const failures: unknown[] = [];
+  settled.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      groups.push(result.value);
+    } else {
+      failures.push(result.reason);
+      console.warn("[AFTERMARKET_LISTING_KIND_ERROR]", {
+        kind: kinds[index]?.kind,
+        message: result.reason instanceof Error ? result.reason.message : "unknown listing error",
+      });
+    }
+  });
+
+  if (!groups.length && failures.length) {
+    const first = failures[0];
+    throw first instanceof Error ? first : new Error("AfterMarket listing sources failed.");
+  }
 
   const deduped = new Map<string, MarketAuction>();
   for (const item of groups.flat()) {
