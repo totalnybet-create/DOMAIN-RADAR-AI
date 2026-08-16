@@ -42,11 +42,18 @@ export async function GET(request: Request) {
   const maxLength = clampInt(url.searchParams.get("maxLength"), 14, 3, 30);
   const minScore = clampInt(url.searchParams.get("minScore"), config.minScore, 0, 100);
   const maxPrice = clampFloat(url.searchParams.get("maxPrice"), config.maxDomainPrice, 1, 100000);
+  const startedAt = Date.now();
 
   try {
     if (mode === "auctions") {
+      // Keep a single interactive scan responsive. The AfterMarket API supports paging,
+      // so broad/deep scans should be done in multiple bounded requests instead of
+      // blocking one browser request with thousands of marketplace records.
+      const scanSize = Math.min(800, Math.max(limit * 2, 300));
+      console.info("[PL_SNIPER_SCAN_START]", { mode, limit, scanSize, maxLength, maxPrice });
+
       const source = await listPlAuctionsRuntime(credentials, {
-        size: Math.min(5000, Math.max(limit * 8, 800)),
+        size: scanSize,
         maxLength,
         maxPrice,
       });
@@ -84,6 +91,14 @@ export async function GET(request: Request) {
         .sort((a, b) => b.score - a.score || (a.minBid ?? a.price ?? Infinity) - (b.minBid ?? b.price ?? Infinity));
       const results = qualified.slice(0, limit);
 
+      console.info("[PL_SNIPER_SCAN_DONE]", {
+        mode,
+        scanned: source.length,
+        qualified: qualified.length,
+        returned: results.length,
+        durationMs: Date.now() - startedAt,
+      });
+
       return Response.json(
         {
           connected: true,
@@ -101,8 +116,11 @@ export async function GET(request: Request) {
       );
     }
 
+    const scanSize = Math.min(800, Math.max(limit * 2, 250));
+    console.info("[PL_SNIPER_SCAN_START]", { mode, limit, scanSize, maxLength });
+
     const source = await listExpiringPlRuntime(credentials, {
-      size: Math.min(5000, Math.max(limit * 10, 1000)),
+      size: scanSize,
       maxLength,
       order: "deleted",
     });
@@ -142,6 +160,14 @@ export async function GET(request: Request) {
       .sort((a, b) => b.score - a.score || (b.majesticQuality || 0) - (a.majesticQuality || 0) || (a.deletedTime || Infinity) - (b.deletedTime || Infinity));
     const results = qualified.slice(0, limit);
 
+    console.info("[PL_SNIPER_SCAN_DONE]", {
+      mode,
+      scanned: source.length,
+      qualified: qualified.length,
+      returned: results.length,
+      durationMs: Date.now() - startedAt,
+    });
+
     return Response.json(
       {
         connected: true,
@@ -158,12 +184,20 @@ export async function GET(request: Request) {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
+    const message = error instanceof Error ? error.message : "PL Sniper scan failed.";
+    console.error("[PL_SNIPER_SCAN_ERROR]", {
+      mode,
+      message,
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      durationMs: Date.now() - startedAt,
+    });
+
     return Response.json(
       {
         connected: true,
         connectionSource: credentials.source,
         engine: "SZTOS_SCORE_V2",
-        error: error instanceof Error ? error.message : "PL Sniper scan failed.",
+        error: message,
       },
       { status: 502, headers: { "Cache-Control": "no-store" } },
     );
