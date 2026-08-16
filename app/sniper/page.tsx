@@ -15,6 +15,7 @@ type Signal = { status: SignalStatus; label: string; detail: string };
 type SignalKey = "name" | "history" | "seo" | "traffic" | "market" | "value" | "safe";
 type Signals = Record<SignalKey, Signal>;
 type Breakdown = { name: number; commercial: number; authority: number; market: number; value: number; penalties: number };
+type SortKey = "recommended" | "score" | "priceAsc" | "priceDesc" | "ageDesc" | "endingSoon" | "dropSoon" | "name";
 
 type BaseResult = {
   type: "expiring" | "auction";
@@ -90,9 +91,20 @@ const criteria: Array<{ key: SignalKey; title: string; description: string }> = 
   { key: "history", title: "Historia", description: "wiek i/lub realny ślad archiwalnej strony" },
   { key: "seo", title: "SEO", description: "Majestic, referring domains i backlinki" },
   { key: "traffic", title: "Ruch*", description: "pośredni ślad widoczności; nie jest to Analytics" },
-  { key: "market", title: "Rynek", description: "oferty, pilność, drop lub kończąca się aukcja" },
+  { key: "market", title: "Aktywność / pilność", description: "oferty, last minute, bliski koniec aukcji lub drop" },
   { key: "value", title: "Cena / wartość", description: "cena mieści się w założonym progu okazji" },
   { key: "safe", title: "Bez czerwonej flagi", description: "brak oczywistego trademarku lub odrzucenia" },
+];
+
+const sortOptions: Array<{ value: SortKey; label: string }> = [
+  { value: "recommended", label: "Najlepsze ogólnie" },
+  { value: "score", label: "Score — najwyższy" },
+  { value: "priceAsc", label: "Cena — najniższa" },
+  { value: "priceDesc", label: "Cena — najwyższa" },
+  { value: "ageDesc", label: "Wiek / historia — najstarsze" },
+  { value: "endingSoon", label: "Aukcje — kończące się najszybciej" },
+  { value: "dropSoon", label: "DROP — najbliższy termin" },
+  { value: "name", label: "Nazwa — A–Z" },
 ];
 
 function money(value?: number, currency = "PLN") {
@@ -112,9 +124,11 @@ function dateTime(value?: number) {
 function countdown(endtime: number | undefined, nowMs: number) {
   if (!endtime) return "—";
   const seconds = Math.max(0, Math.floor(endtime - nowMs / 1000));
-  const h = Math.floor(seconds / 3600);
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
+  if (d > 0) return `${d}d ${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m`;
   if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
@@ -135,6 +149,19 @@ function mergeUnique(existing: Result[], incoming: Result[]) {
   return [...merged.values()];
 }
 
+function resultPrice(item: Result) {
+  return item.type === "auction" ? item.minBid ?? item.price : undefined;
+}
+
+function compareMissingLast(a?: number, b?: number, direction: "asc" | "desc" = "asc") {
+  const aMissing = a === undefined || !Number.isFinite(a);
+  const bMissing = b === undefined || !Number.isFinite(b);
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  return direction === "asc" ? a - b : b - a;
+}
+
 export default function PlSniperPage() {
   const [status, setStatus] = useState<SniperStatus | null>(null);
   const [market, setMarket] = useState<Result[]>([]);
@@ -150,6 +177,7 @@ export default function PlSniperPage() {
   const [lastRun, setLastRun] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
   const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("recommended");
   const [selected, setSelected] = useState<Result | null>(null);
   const [active, setActive] = useState<Record<SignalKey, boolean>>({
     name: false,
@@ -196,7 +224,6 @@ export default function PlSniperPage() {
         start: String(start),
         limit: "1000",
         maxLength: "24",
-        maxPrice: "100000",
       });
       const response = await fetch(`/api/sniper/scan?${params.toString()}`, { cache: "no-store" });
       const payload = (await response.json()) as MarketResponse;
@@ -221,7 +248,7 @@ export default function PlSniperPage() {
     if (endingLoading) return;
     if (!silent) setEndingLoading(true);
     try {
-      const params = new URLSearchParams({ mode: "ending", limit: "80", maxPrice: "100000" });
+      const params = new URLSearchParams({ mode: "ending", limit: "80" });
       const response = await fetch(`/api/sniper/scan?${params.toString()}`, { cache: "no-store" });
       const payload = (await response.json()) as EndingResponse;
       if (!response.ok) throw new Error(payload.error || `Błąd API ${response.status}`);
@@ -237,11 +264,33 @@ export default function PlSniperPage() {
 
   const visibleMarket = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return market
+    const filtered = market
       .filter((item) => !query || item.domain.toLowerCase().includes(query))
-      .filter((item) => activeKeys.every((key) => item.signals[key].status === "pass"))
-      .sort((a, b) => b.passCount - a.passCount || b.score - a.score || a.domain.localeCompare(b.domain));
-  }, [market, activeKeys, search]);
+      .filter((item) => activeKeys.every((key) => item.signals[key].status === "pass"));
+
+    return [...filtered].sort((a, b) => {
+      if (sortKey === "score") return b.score - a.score || b.passCount - a.passCount || a.domain.localeCompare(b.domain);
+      if (sortKey === "priceAsc") return compareMissingLast(resultPrice(a), resultPrice(b), "asc") || b.score - a.score;
+      if (sortKey === "priceDesc") return compareMissingLast(resultPrice(a), resultPrice(b), "desc") || b.score - a.score;
+      if (sortKey === "ageDesc") {
+        const aAge = a.type === "expiring" ? a.ageYears : undefined;
+        const bAge = b.type === "expiring" ? b.ageYears : undefined;
+        return compareMissingLast(aAge, bAge, "desc") || b.score - a.score;
+      }
+      if (sortKey === "endingSoon") {
+        const aEnd = a.type === "auction" ? a.endtime : undefined;
+        const bEnd = b.type === "auction" ? b.endtime : undefined;
+        return compareMissingLast(aEnd, bEnd, "asc") || b.score - a.score;
+      }
+      if (sortKey === "dropSoon") {
+        const aDrop = a.type === "expiring" ? a.deletedTime : undefined;
+        const bDrop = b.type === "expiring" ? b.deletedTime : undefined;
+        return compareMissingLast(aDrop, bDrop, "asc") || b.score - a.score;
+      }
+      if (sortKey === "name") return a.domain.localeCompare(b.domain, "pl");
+      return b.passCount - a.passCount || b.score - a.score || a.domain.localeCompare(b.domain);
+    });
+  }, [market, activeKeys, search, sortKey]);
 
   const liveEnding = useMemo(() => ending.filter((item) => (item.endtime || 0) > nowMs / 1000).slice(0, 8), [ending, nowMs]);
   const topScore = useMemo(() => visibleMarket.reduce((best, item) => Math.max(best, item.score), 0), [visibleMarket]);
@@ -269,7 +318,7 @@ export default function PlSniperPage() {
         <section className={styles.hero}>
           <div className={styles.heroBadge}>PL SNAJPER · MARKET WORKBENCH</div>
           <h1>Cały rynek.<br/><span>Jeden ekran.</span></h1>
-          <p>Spadające domeny, aukcje, last minute, caught i tanie oferty trafiają do jednej puli. Najpierw widzisz szeroki rynek, potem Mocnym Researchem odsiewasz go aż zostają najlepsze kandydatury.</p>
+          <p>Spadające domeny, aukcje, last minute, caught i tanie oferty trafiają do jednej puli. Przeglądasz ją jak giełdę: widzisz cenę, termin, historię i sygnały jakości, a potem sortujesz albo zawężasz Mocnym Researchem.</p>
           <div className={styles.statusStrip}>
             <span className={status?.connected ? styles.ok : styles.off}>● {status?.connected ? "AfterMarket API połączone" : "AfterMarket API niepodłączone"}</span>
             <span className={status?.executionEnabled ? styles.warn : styles.safe}>● AUTO BUY {status?.executionEnabled ? "ARMED" : "LOCKED"}</span>
@@ -309,7 +358,7 @@ export default function PlSniperPage() {
             <div>
               <span>SZEROKI SKAN</span>
               <h2>Rynek domen .pl</h2>
-              <p>Bez przełączania źródeł. Wyniki są sortowane najpierw po liczbie spełnionych warunków, potem po score.</p>
+              <p>Jedna wspólna lista bez przełączania źródeł. Niczego nie musisz filtrować — możesz po prostu przeglądać oferty i ustawić kolejność, która Cię interesuje.</p>
             </div>
             <div className={styles.actionGroup}>
               <button className={styles.secondaryButton} onClick={() => void loadMarket(0, false)} disabled={marketLoading || status?.connected === false}>{marketLoading ? "Skanuję…" : "Odśwież rynek"}</button>
@@ -328,7 +377,7 @@ export default function PlSniperPage() {
 
           <div className={styles.researchPanel}>
             <div className={styles.researchTitle}>
-              <div><span>MOCNY RESEARCH</span><h3>Włączaj kolejne warunki i obserwuj, jak pula się zawęża.</h3></div>
+              <div><span>MOCNY RESEARCH</span><h3>Włączaj kolejne warunki tylko wtedy, gdy chcesz zawęzić listę.</h3></div>
               <button onClick={clearResearch}>Wyczyść filtry</button>
             </div>
             <div className={styles.criteriaGrid}>
@@ -343,9 +392,22 @@ export default function PlSniperPage() {
                 );
               })}
             </div>
-            <div className={styles.searchRow}>
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Szukaj konkretnej domeny w pobranej puli…" />
-              <span>Aktywne warunki: <b>{activeKeys.length}</b></span>
+
+            <div className={styles.marketToolbar}>
+              <div className={styles.searchBox}>
+                <span>SZUKAJ</span>
+                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="np. hotel.pl, auto, zdrowie…" />
+              </div>
+              <label className={styles.sortBox}>
+                <span>SORTUJ WEDŁUG</span>
+                <select value={sortKey} onChange={(event) => setSortKey(event.target.value as SortKey)}>
+                  {sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+              <div className={styles.activeSummary}>
+                <span>AKTYWNE WARUNKI</span>
+                <strong>{activeKeys.length}</strong>
+              </div>
             </div>
           </div>
         </section>
@@ -361,25 +423,28 @@ export default function PlSniperPage() {
           ) : (
             <div className={styles.tableWrap}>
               <div className={styles.tableHeader}>
-                <span>#</span><span>Domena / źródło</span><span>Score</span><span>Warunki</span><span>Najważniejsze dane</span><span/>
+                <span>#</span><span>Domena / źródło</span><span>Score</span><span>Cena</span><span>Koniec / DROP</span><span>Warunki</span><span/>
               </div>
               {visibleMarket.map((item, index) => (
                 <button className={styles.resultRow} key={`${item.type}-${item.domainAscii}-${item.type === "auction" ? item.auctionId : index}`} onClick={() => setSelected(item)}>
                   <span className={styles.rank}>#{index + 1}</span>
-                  <div className={styles.domainCell}><strong>{item.domain}</strong><span>{item.source}</span></div>
+                  <div className={styles.domainCell}>
+                    <strong>{item.domain}</strong>
+                    <span>{item.source}</span>
+                    {item.type === "expiring" && item.ageYears !== undefined ? <small>{item.ageYears} lat historii rejestracji</small> : null}
+                  </div>
                   <div className={styles.scoreCell}><strong>{item.score}</strong><span>{item.tier}</span></div>
+                  <div className={styles.priceCell}>
+                    {item.type === "auction" ? <><strong>{money(item.minBid ?? item.price, item.currency)}</strong><span>{item.bids} ofert</span></> : <><strong>—</strong><span>DROP bez ceny aukcyjnej</span></>}
+                  </div>
+                  <div className={styles.deadlineCell}>
+                    {item.type === "auction" ? <><strong>{dateTime(item.endtime)}</strong><span>Zostało {countdown(item.endtime, nowMs)}</span></> : <><strong>{dateTime(item.deletedTime)}</strong><span>Planowany DROP</span></>}
+                  </div>
                   <div className={styles.signalGrid}>
                     {criteria.map((criterion) => {
                       const sig = item.signals[criterion.key];
                       return <span key={criterion.key} className={signalClass(sig.status)} title={sig.detail}>{sig.status === "pass" ? "✓" : sig.status === "fail" ? "✕" : "?"} {criterion.title}</span>;
                     })}
-                  </div>
-                  <div className={styles.primaryData}>
-                    {item.type === "expiring" ? (
-                      <><span>Wiek <b>{item.ageYears !== undefined ? `${item.ageYears} lat` : "—"}</b></span><span>TF <b>{item.majesticQuality}</b></span><span>Ref <b>{item.majesticDomains}</b></span><span>Drop <b>{dateTime(item.deletedTime)}</b></span></>
-                    ) : (
-                      <><span>Cena <b>{money(item.minBid ?? item.price, item.currency)}</b></span><span>Oferty <b>{item.bids}</b></span><span>Koniec <b>{item.endtime ? countdown(item.endtime, nowMs) : "—"}</b></span></>
-                    )}
                   </div>
                   <span className={styles.openDetails}>Szczegóły →</span>
                 </button>
