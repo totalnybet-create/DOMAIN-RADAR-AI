@@ -14,7 +14,6 @@ export type ProvisionSession = {
     expires?: number;
     httpOnly?: boolean;
     secure?: boolean;
-    sameSite?: "Strict" | "Lax" | "None";
   }>;
 };
 
@@ -108,7 +107,6 @@ async function captureSession(page: Page): Promise<ProvisionSession> {
     ...(Number.isFinite(cookie.expires) ? { expires: cookie.expires } : {}),
     httpOnly: cookie.httpOnly,
     secure: cookie.secure,
-    ...(cookie.sameSite ? { sameSite: cookie.sameSite } : {}),
   }));
   return { url: page.url(), cookies };
 }
