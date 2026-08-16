@@ -203,12 +203,12 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const rawMode = url.searchParams.get("mode");
-  const mode = rawMode === "market" || rawMode === "ending" || rawMode === "auctions" ? rawMode : "expiring";
+  const mode = rawMode === "market" || rawMode === "ending" || rawMode === "watch" || rawMode === "auctions" ? rawMode : "expiring";
   const config = getAftermarketConfig();
-  const limit = clampInt(url.searchParams.get("limit"), mode === "market" ? 1000 : 100, 10, 1500);
-  const maxLength = clampInt(url.searchParams.get("maxLength"), mode === "market" ? 24 : 14, 3, 30);
+  const limit = clampInt(url.searchParams.get("limit"), mode === "market" ? 1000 : mode === "watch" ? 50 : 100, 10, 1500);
+  const maxLength = clampInt(url.searchParams.get("maxLength"), mode === "market" || mode === "watch" ? 30 : 14, 3, 30);
   const minScore = clampInt(url.searchParams.get("minScore"), config.minScore, 0, 100);
-  const maxPrice = clampFloat(url.searchParams.get("maxPrice"), mode === "market" || mode === "ending" ? 100000 : config.maxDomainPrice, 1, 100000);
+  const maxPrice = clampFloat(url.searchParams.get("maxPrice"), mode === "market" || mode === "ending" || mode === "watch" ? 100000 : config.maxDomainPrice, 1, 100000);
   const startedAt = Date.now();
 
   try {
@@ -288,6 +288,54 @@ export async function GET(request: Request) {
           scanned: source.length,
           returned: results.length,
           serverTime: Math.floor(now),
+          results,
+        },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    if (mode === "watch") {
+      const domains = (url.searchParams.get("domains") || "")
+        .split(",")
+        .map((value) => value.trim().toLowerCase())
+        .filter(Boolean)
+        .slice(0, 50);
+      if (!domains.length) {
+        return Response.json(
+          { connected: true, connectionSource: credentials.source, engine: "SZTOS_WATCH_V1", mode, scanned: 0, returned: 0, results: [] },
+          { headers: { "Cache-Control": "no-store" } },
+        );
+      }
+
+      const wanted = new Set(domains);
+      const source = await listPlAuctionsRuntime(credentials, {
+        size: 5000,
+        start: 0,
+        maxLength: 30,
+        maxPrice: null,
+        order: "endtime",
+        qualityPrefilter: false,
+      });
+      const results = source
+        .filter((item) => wanted.has(item.name.toLowerCase()) || Boolean(item.nameIDN && wanted.has(item.nameIDN.toLowerCase())))
+        .map((item) => evaluateAuction(item, config.maxDomainPrice))
+        .slice(0, limit);
+
+      console.info("[PL_SNIPER_WATCH_DONE]", {
+        requested: domains.length,
+        scanned: source.length,
+        returned: results.length,
+        durationMs: Date.now() - startedAt,
+      });
+
+      return Response.json(
+        {
+          connected: true,
+          connectionSource: credentials.source,
+          engine: "SZTOS_WATCH_V1",
+          mode,
+          scanned: source.length,
+          returned: results.length,
           results,
         },
         { headers: { "Cache-Control": "no-store" } },

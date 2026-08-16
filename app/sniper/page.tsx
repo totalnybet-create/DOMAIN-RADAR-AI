@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import styles from "./page.module.css";
+import extraStyles from "./watchlist.module.css";
 
 type SniperStatus = {
   connected: boolean;
@@ -15,7 +16,22 @@ type Signal = { status: SignalStatus; label: string; detail: string };
 type SignalKey = "name" | "history" | "seo" | "traffic" | "market" | "value" | "safe";
 type Signals = Record<SignalKey, Signal>;
 type Breakdown = { name: number; commercial: number; authority: number; market: number; value: number; penalties: number };
-type SortKey = "recommended" | "score" | "priceAsc" | "priceDesc" | "ageDesc" | "endingSoon" | "dropSoon" | "name";
+type SortKey =
+  | "recommended"
+  | "score"
+  | "bestName"
+  | "priceAsc"
+  | "priceDesc"
+  | "ageDesc"
+  | "oldestMarket"
+  | "historyStrength"
+  | "seoStrength"
+  | "trafficStrength"
+  | "marketActivity"
+  | "valueStrength"
+  | "endingSoon"
+  | "dropSoon"
+  | "name";
 
 type BaseResult = {
   type: "expiring" | "auction";
@@ -86,6 +102,18 @@ type EndingResponse = {
   error?: string;
 };
 
+type WatchEntry = {
+  key: string;
+  addedAt: number;
+  lastSeenAt: number;
+  initialPrice?: number;
+  previousPrice?: number;
+  lastPrice?: number;
+  snapshot: Result;
+};
+
+const WATCH_STORAGE_KEY = "pl-sniper-watchlist-v1";
+
 const criteria: Array<{ key: SignalKey; title: string; description: string }> = [
   { key: "name", title: "Mocna nazwa", description: "krótka, czytelna, brandowa lub komercyjna" },
   { key: "history", title: "Historia", description: "wiek i/lub realny ślad archiwalnej strony" },
@@ -99,9 +127,16 @@ const criteria: Array<{ key: SignalKey; title: string; description: string }> = 
 const sortOptions: Array<{ value: SortKey; label: string }> = [
   { value: "recommended", label: "Najlepsze ogólnie" },
   { value: "score", label: "Score — najwyższy" },
+  { value: "bestName", label: "Najlepsza nazwa" },
   { value: "priceAsc", label: "Cena — najniższa" },
   { value: "priceDesc", label: "Cena — najwyższa" },
   { value: "ageDesc", label: "Wiek / historia — najstarsze" },
+  { value: "oldestMarket", label: "Najdłużej na rynku — lata" },
+  { value: "historyStrength", label: "Historia — najmocniejsza" },
+  { value: "seoStrength", label: "SEO / autorytet — najmocniejsze" },
+  { value: "trafficStrength", label: "Widoczność / ruch* — największa" },
+  { value: "marketActivity", label: "Aktywność — najwięcej ofert" },
+  { value: "valueStrength", label: "Cena / wartość — najlepsza okazja" },
   { value: "endingSoon", label: "Aukcje — kończące się najszybciej" },
   { value: "dropSoon", label: "DROP — najbliższy termin" },
   { value: "name", label: "Nazwa — A–Z" },
@@ -119,6 +154,11 @@ function money(value?: number, currency = "PLN") {
 function dateTime(value?: number) {
   if (!value) return "—";
   return new Date(value * 1000).toLocaleString("pl-PL", { dateStyle: "short", timeStyle: "medium" });
+}
+
+function timeFromMs(value?: number) {
+  if (!value) return "—";
+  return new Date(value).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function countdown(endtime: number | undefined, nowMs: number) {
@@ -153,6 +193,41 @@ function resultPrice(item: Result) {
   return item.type === "auction" ? item.minBid ?? item.price : undefined;
 }
 
+function resultKey(item: Result) {
+  return item.type === "auction" && item.auctionId
+    ? `auction:${item.auctionId}`
+    : `${item.type}:${item.domainAscii.toLowerCase()}`;
+}
+
+function namePower(item: Result) {
+  return item.breakdown.name + item.breakdown.commercial;
+}
+
+function historyPower(item: Result) {
+  if (item.type !== "expiring") return undefined;
+  return item.breakdown.authority * 100 + (item.ageYears || 0);
+}
+
+function seoPower(item: Result) {
+  if (item.type !== "expiring") return undefined;
+  return item.majesticQuality * 100000 + item.majesticDomains * 100 + Math.min(item.majesticLinks, 99);
+}
+
+function trafficPower(item: Result) {
+  if (item.type !== "expiring") return undefined;
+  return item.majesticDomains * 1000 + item.pages * 10 + Math.min(item.majesticLinks, 999);
+}
+
+function activityPower(item: Result) {
+  if (item.type === "auction") return item.bids * 100 + item.breakdown.market * 10 + (item.auctionKind === "last-minute" ? 50 : 0);
+  return item.breakdown.market;
+}
+
+function valuePower(item: Result) {
+  const price = resultPrice(item);
+  return item.breakdown.value * 100000 - (price ?? 99999);
+}
+
 function compareMissingLast(a?: number, b?: number, direction: "asc" | "desc" = "asc") {
   const aMissing = a === undefined || !Number.isFinite(a);
   const bMissing = b === undefined || !Number.isFinite(b);
@@ -162,12 +237,24 @@ function compareMissingLast(a?: number, b?: number, direction: "asc" | "desc" = 
   return direction === "asc" ? a - b : b - a;
 }
 
+function watchTrend(entry: WatchEntry) {
+  const current = entry.lastPrice;
+  const initial = entry.initialPrice;
+  if (current === undefined || initial === undefined) return { label: "brak ceny", className: extraStyles.trendFlat };
+  const diff = current - initial;
+  const currency = entry.snapshot.type === "auction" ? entry.snapshot.currency : "PLN";
+  if (Math.abs(diff) < 0.0001) return { label: "bez zmiany", className: extraStyles.trendFlat };
+  if (diff > 0) return { label: `↑ +${money(diff, currency)} od dodania`, className: extraStyles.trendUp };
+  return { label: `↓ -${money(Math.abs(diff), currency)} od dodania`, className: extraStyles.trendDown };
+}
+
 export default function PlSniperPage() {
   const [status, setStatus] = useState<SniperStatus | null>(null);
   const [market, setMarket] = useState<Result[]>([]);
   const [ending, setEnding] = useState<AuctionResult[]>([]);
   const [marketLoading, setMarketLoading] = useState(false);
   const [endingLoading, setEndingLoading] = useState(false);
+  const [watchLoading, setWatchLoading] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
@@ -179,6 +266,8 @@ export default function PlSniperPage() {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("recommended");
   const [selected, setSelected] = useState<Result | null>(null);
+  const [watched, setWatched] = useState<Record<string, WatchEntry>>({});
+  const [watchReady, setWatchReady] = useState(false);
   const [active, setActive] = useState<Record<SignalKey, boolean>>({
     name: false,
     history: false,
@@ -195,6 +284,29 @@ export default function PlSniperPage() {
       .then((payload: SniperStatus) => setStatus(payload))
       .catch(() => setStatus(null));
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(WATCH_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, WatchEntry>;
+        if (parsed && typeof parsed === "object") setWatched(parsed);
+      }
+    } catch {
+      // Ignore corrupted local watchlist and start clean.
+    } finally {
+      setWatchReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!watchReady) return;
+    try {
+      window.localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watched));
+    } catch {
+      // Local storage may be blocked; the current session still works.
+    }
+  }, [watched, watchReady]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -214,6 +326,72 @@ export default function PlSniperPage() {
     return () => window.clearInterval(timer);
   }, [status?.connected]);
 
+  const watchedAuctionDomains = useMemo(() => Object.values(watched)
+    .filter((entry) => entry.snapshot.type === "auction")
+    .map((entry) => entry.snapshot.domainAscii.toLowerCase())
+    .sort()
+    .join(","), [watched]);
+
+  useEffect(() => {
+    if (!status?.connected || !watchReady || !watchedAuctionDomains) return;
+    void loadWatchedAuctions(true);
+    const timer = window.setInterval(() => void loadWatchedAuctions(true), 60000);
+    return () => window.clearInterval(timer);
+  }, [status?.connected, watchReady, watchedAuctionDomains]);
+
+  function updateWatchedSnapshots(items: Result[]) {
+    if (!items.length) return;
+    setWatched((previous) => {
+      let changed = false;
+      const next = { ...previous };
+      const seenAt = Date.now();
+      for (const item of items) {
+        const key = resultKey(item);
+        const existing = next[key];
+        if (!existing) continue;
+        const price = resultPrice(item);
+        const priceChanged = price !== undefined && existing.lastPrice !== undefined && Math.abs(price - existing.lastPrice) > 0.0001;
+        next[key] = {
+          ...existing,
+          previousPrice: priceChanged ? existing.lastPrice : existing.previousPrice,
+          lastPrice: price ?? existing.lastPrice,
+          lastSeenAt: seenAt,
+          snapshot: item,
+        };
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }
+
+  function toggleWatch(item: Result) {
+    const key = resultKey(item);
+    const now = Date.now();
+    const price = resultPrice(item);
+    setWatched((previous) => {
+      if (previous[key]) {
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      }
+      return {
+        ...previous,
+        [key]: {
+          key,
+          addedAt: now,
+          lastSeenAt: now,
+          initialPrice: price,
+          lastPrice: price,
+          snapshot: item,
+        },
+      };
+    });
+  }
+
+  function isWatched(item: Result) {
+    return Boolean(watched[resultKey(item)]);
+  }
+
   async function loadMarket(start = 0, append = false) {
     if (marketLoading) return;
     setMarketLoading(true);
@@ -230,6 +408,7 @@ export default function PlSniperPage() {
       if (!response.ok) throw new Error(payload.error || `Błąd API ${response.status}`);
       const incoming = payload.results || [];
       setMarket((previous) => append ? mergeUnique(previous, incoming) : incoming);
+      updateWatchedSnapshots(incoming);
       setNextStart(payload.nextStart || 0);
       setScannedTotal((previous) => append ? previous + (payload.scanned || 0) : (payload.scanned || 0));
       setSourceTotals((previous) => append
@@ -252,11 +431,29 @@ export default function PlSniperPage() {
       const response = await fetch(`/api/sniper/scan?${params.toString()}`, { cache: "no-store" });
       const payload = (await response.json()) as EndingResponse;
       if (!response.ok) throw new Error(payload.error || `Błąd API ${response.status}`);
-      setEnding(payload.results || []);
+      const incoming = payload.results || [];
+      setEnding(incoming);
+      updateWatchedSnapshots(incoming);
     } catch (cause) {
       if (!silent) setError(cause instanceof Error ? cause.message : "Nie udało się odświeżyć kończących aukcji.");
     } finally {
       if (!silent) setEndingLoading(false);
+    }
+  }
+
+  async function loadWatchedAuctions(silent = false) {
+    if (!watchedAuctionDomains || watchLoading) return;
+    if (!silent) setWatchLoading(true);
+    try {
+      const params = new URLSearchParams({ mode: "watch", limit: "50", domains: watchedAuctionDomains });
+      const response = await fetch(`/api/sniper/scan?${params.toString()}`, { cache: "no-store" });
+      const payload = (await response.json()) as EndingResponse;
+      if (!response.ok) throw new Error(payload.error || `Błąd API ${response.status}`);
+      updateWatchedSnapshots(payload.results || []);
+    } catch (cause) {
+      if (!silent) setError(cause instanceof Error ? cause.message : "Nie udało się odświeżyć obserwowanych aukcji.");
+    } finally {
+      if (!silent) setWatchLoading(false);
     }
   }
 
@@ -270,13 +467,19 @@ export default function PlSniperPage() {
 
     return [...filtered].sort((a, b) => {
       if (sortKey === "score") return b.score - a.score || b.passCount - a.passCount || a.domain.localeCompare(b.domain);
+      if (sortKey === "bestName") return namePower(b) - namePower(a) || b.score - a.score;
       if (sortKey === "priceAsc") return compareMissingLast(resultPrice(a), resultPrice(b), "asc") || b.score - a.score;
       if (sortKey === "priceDesc") return compareMissingLast(resultPrice(a), resultPrice(b), "desc") || b.score - a.score;
-      if (sortKey === "ageDesc") {
+      if (sortKey === "ageDesc" || sortKey === "oldestMarket") {
         const aAge = a.type === "expiring" ? a.ageYears : undefined;
         const bAge = b.type === "expiring" ? b.ageYears : undefined;
         return compareMissingLast(aAge, bAge, "desc") || b.score - a.score;
       }
+      if (sortKey === "historyStrength") return compareMissingLast(historyPower(a), historyPower(b), "desc") || b.score - a.score;
+      if (sortKey === "seoStrength") return compareMissingLast(seoPower(a), seoPower(b), "desc") || b.score - a.score;
+      if (sortKey === "trafficStrength") return compareMissingLast(trafficPower(a), trafficPower(b), "desc") || b.score - a.score;
+      if (sortKey === "marketActivity") return activityPower(b) - activityPower(a) || b.score - a.score;
+      if (sortKey === "valueStrength") return valuePower(b) - valuePower(a) || compareMissingLast(resultPrice(a), resultPrice(b), "asc");
       if (sortKey === "endingSoon") {
         const aEnd = a.type === "auction" ? a.endtime : undefined;
         const bEnd = b.type === "auction" ? b.endtime : undefined;
@@ -292,7 +495,12 @@ export default function PlSniperPage() {
     });
   }, [market, activeKeys, search, sortKey]);
 
-  const liveEnding = useMemo(() => ending.filter((item) => (item.endtime || 0) > nowMs / 1000).slice(0, 8), [ending, nowMs]);
+  const liveEnding = useMemo(() => ending.filter((item) => (item.endtime || 0) > nowMs / 1000), [ending, nowMs]);
+  const watchedEntries = useMemo(() => Object.values(watched).sort((a, b) => {
+    const aEnd = a.snapshot.type === "auction" ? a.snapshot.endtime : a.snapshot.deletedTime;
+    const bEnd = b.snapshot.type === "auction" ? b.snapshot.endtime : b.snapshot.deletedTime;
+    return compareMissingLast(aEnd, bEnd, "asc") || b.addedAt - a.addedAt;
+  }), [watched]);
   const topScore = useMemo(() => visibleMarket.reduce((best, item) => Math.max(best, item.score), 0), [visibleMarket]);
 
   function toggleCriterion(key: SignalKey) {
@@ -318,11 +526,12 @@ export default function PlSniperPage() {
         <section className={styles.hero}>
           <div className={styles.heroBadge}>PL SNAJPER · MARKET WORKBENCH</div>
           <h1>Cały rynek.<br/><span>Jeden ekran.</span></h1>
-          <p>Spadające domeny, aukcje, last minute, caught i tanie oferty trafiają do jednej puli. Przeglądasz ją jak giełdę: widzisz cenę, termin, historię i sygnały jakości, a potem sortujesz albo zawężasz Mocnym Researchem.</p>
+          <p>Spadające domeny, aukcje, last minute, caught i tanie oferty trafiają do jednej puli. Przeglądasz ją jak giełdę: widzisz cenę, termin, historię i sygnały jakości, sortujesz po tym, co jest dla Ciebie najważniejsze, a wybrane domeny zapisujesz do obserwowanych.</p>
           <div className={styles.statusStrip}>
             <span className={status?.connected ? styles.ok : styles.off}>● {status?.connected ? "AfterMarket API połączone" : "AfterMarket API niepodłączone"}</span>
             <span className={status?.executionEnabled ? styles.warn : styles.safe}>● AUTO BUY {status?.executionEnabled ? "ARMED" : "LOCKED"}</span>
             <span>Ostatni skan: {lastRun || "—"}</span>
+            <span>Obserwowane: {watchedEntries.length}</span>
           </div>
         </section>
 
@@ -337,20 +546,61 @@ export default function PlSniperPage() {
             <div>
               <span className={styles.liveEyebrow}><i/> NA ŻYWO · ODŚWIEŻANIE CO 10 S</span>
               <h2>Kończące się aukcje</h2>
-              <p>Odliczanie działa co sekundę. Po dojściu do zera aukcja znika z widoku, a następna przesuwa się na jej miejsce.</p>
+              <p>Pełna przewijalna lista. Odliczanie działa co sekundę; gdy aukcja dojdzie do zera, znika, a kolejne przesuwają się wyżej.</p>
             </div>
             <button className={styles.secondaryButton} onClick={() => void loadEnding(false)} disabled={endingLoading || status?.connected === false}>{endingLoading ? "Odświeżam…" : "Odśwież teraz"}</button>
           </div>
-          <div className={styles.liveRail}>
+          <div className={`${styles.liveRail} ${extraStyles.liveRailScroll}`}>
             {liveEnding.length ? liveEnding.map((item) => (
-              <button className={styles.liveCard} key={`live-${item.auctionId}-${item.domainAscii}`} onClick={() => setSelected(item)}>
-                <div className={styles.liveCardTop}><span>{item.source}</span><b>{item.score}</b></div>
-                <strong>{item.domain}</strong>
-                <div className={styles.countdown}>{countdown(item.endtime, nowMs)}</div>
-                <div className={styles.liveMeta}><span>{money(item.minBid ?? item.price, item.currency)}</span><span>{item.bids} ofert</span></div>
-              </button>
+              <div className={`${styles.liveCard} ${extraStyles.liveListCard}`} key={`live-${item.auctionId}-${item.domainAscii}`}>
+                <button className={extraStyles.liveOpen} onClick={() => setSelected(item)}>
+                  <div className={extraStyles.liveIdentity}><span>{item.source}</span><strong>{item.domain}</strong></div>
+                  <div className={extraStyles.liveScore}><b>{item.score}</b></div>
+                  <div className={extraStyles.liveCountdown}>{countdown(item.endtime, nowMs)}</div>
+                  <div className={extraStyles.livePrice}><strong>{money(item.minBid ?? item.price, item.currency)}</strong><span>{item.bids} ofert</span></div>
+                </button>
+                <button
+                  className={isWatched(item) ? extraStyles.watchIconActive : extraStyles.watchIcon}
+                  onClick={() => toggleWatch(item)}
+                  title={isWatched(item) ? "Usuń z obserwowanych" : "Dodaj do obserwowanych"}
+                >{isWatched(item) ? "★" : "☆"}</button>
+              </div>
             )) : <div className={styles.liveEmpty}>Brak aktywnych aukcji w aktualnie pobranej paczce.</div>}
           </div>
+        </section>
+
+        <section className={extraStyles.watchSection}>
+          <div className={extraStyles.watchHead}>
+            <div>
+              <span>OBSERWOWANE <b className={extraStyles.watchBadge}>{watchedEntries.length}</b></span>
+              <h2>Twoje zapamiętane domeny</h2>
+              <p>Cena i stan aukcji aktualizują się automatycznie. Lista jest zachowana w tej przeglądarce, więc nie musisz prowadzić osobnego notesu.</p>
+            </div>
+            <button className={extraStyles.watchRefresh} onClick={() => void loadWatchedAuctions(false)} disabled={!watchedAuctionDomains || watchLoading || status?.connected === false}>{watchLoading ? "Aktualizuję…" : "Odśwież obserwowane"}</button>
+          </div>
+          {!watchedEntries.length ? (
+            <div className={extraStyles.watchEmpty}>Kliknij ☆ przy dowolnej domenie albo aukcji. Pojawi się tutaj i zostanie zapamiętana.</div>
+          ) : (
+            <div className={extraStyles.watchList}>
+              {watchedEntries.map((entry) => {
+                const item = entry.snapshot;
+                const trend = watchTrend(entry);
+                const deadline = item.type === "auction" ? item.endtime : item.deletedTime;
+                const ended = deadline !== undefined && deadline <= nowMs / 1000;
+                return (
+                  <div className={extraStyles.watchRow} key={entry.key}>
+                    <button className={extraStyles.watchMain} onClick={() => setSelected(item)}>
+                      <div className={extraStyles.watchIdentity}><strong>{item.domain}</strong><span>{item.source}</span></div>
+                      <div className={extraStyles.watchMetric}><span>Cena teraz</span><strong>{item.type === "auction" ? money(entry.lastPrice, item.currency) : "DROP"}</strong></div>
+                      <div className={extraStyles.watchMetric}><span>Zmiana</span><strong className={trend.className}>{trend.label}</strong></div>
+                      <div className={extraStyles.watchMetric}><span>{ended ? "Status" : "Koniec / DROP"}</span><strong>{ended ? "ZAKOŃCZONA" : countdown(deadline, nowMs)}</strong><span>akt. {timeFromMs(entry.lastSeenAt)}</span></div>
+                    </button>
+                    <button className={extraStyles.removeWatch} onClick={() => toggleWatch(item)} title="Usuń z obserwowanych">×</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         <section className={styles.workbench}>
@@ -415,7 +665,7 @@ export default function PlSniperPage() {
         <section className={styles.resultsSection}>
           <div className={styles.sectionHead}>
             <div><span>WYNIKI</span><h2>{activeKeys.length ? "Kandydaci po Mocnym Researchu" : "Pełna pobrana pula"}</h2></div>
-            <small>Zielony = spełnia · czerwony = nie spełnia · szary = brak danych</small>
+            <small>Zielony = spełnia · czerwony = nie spełnia · szary = brak danych · ☆ = obserwuj</small>
           </div>
 
           {!visibleMarket.length && !marketLoading ? (
@@ -423,10 +673,19 @@ export default function PlSniperPage() {
           ) : (
             <div className={styles.tableWrap}>
               <div className={styles.tableHeader}>
-                <span>#</span><span>Domena / źródło</span><span>Score</span><span>Cena</span><span>Koniec / DROP</span><span>Warunki</span><span/>
+                <span>#</span><span>Domena / źródło</span><span>Score</span><span>Cena</span><span>Koniec / DROP</span><span>Warunki</span><span>Obserwuj</span>
               </div>
               {visibleMarket.map((item, index) => (
-                <button className={styles.resultRow} key={`${item.type}-${item.domainAscii}-${item.type === "auction" ? item.auctionId : index}`} onClick={() => setSelected(item)}>
+                <div
+                  className={styles.resultRow}
+                  key={`${item.type}-${item.domainAscii}-${item.type === "auction" ? item.auctionId : index}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setSelected(item)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") setSelected(item);
+                  }}
+                >
                   <span className={styles.rank}>#{index + 1}</span>
                   <div className={styles.domainCell}>
                     <strong>{item.domain}</strong>
@@ -446,8 +705,15 @@ export default function PlSniperPage() {
                       return <span key={criterion.key} className={signalClass(sig.status)} title={sig.detail}>{sig.status === "pass" ? "✓" : sig.status === "fail" ? "✕" : "?"} {criterion.title}</span>;
                     })}
                   </div>
-                  <span className={styles.openDetails}>Szczegóły →</span>
-                </button>
+                  <div className={extraStyles.rowActions}>
+                    <button
+                      className={isWatched(item) ? extraStyles.rowWatchActive : extraStyles.rowWatch}
+                      onClick={(event) => { event.stopPropagation(); toggleWatch(item); }}
+                      title={isWatched(item) ? "Usuń z obserwowanych" : "Dodaj do obserwowanych"}
+                    >{isWatched(item) ? "★" : "☆"}</button>
+                    <span className={extraStyles.rowArrow}>→</span>
+                  </div>
+                </div>
               ))}
             </div>
           )}
@@ -465,7 +731,10 @@ export default function PlSniperPage() {
           <aside className={styles.detailDrawer} onMouseDown={(event) => event.stopPropagation()}>
             <div className={styles.drawerHead}>
               <div><span>{selected.source}</span><h2>{selected.domain}</h2><p>{selected.tier} · SCORE {selected.score}</p></div>
-              <button onClick={() => setSelected(null)}>×</button>
+              <div className={extraStyles.drawerActions}>
+                <button className={isWatched(selected) ? extraStyles.drawerWatchActive : extraStyles.drawerWatch} onClick={() => toggleWatch(selected)}>{isWatched(selected) ? "★ Obserwujesz" : "☆ Obserwuj"}</button>
+                <button className={extraStyles.drawerClose} onClick={() => setSelected(null)}>×</button>
+              </div>
             </div>
 
             <div className={styles.drawerSignals}>
