@@ -96,6 +96,7 @@ export async function listExpiringPlRuntime(
   credentials: Pick<AftermarketRuntimeCredentials, "apiKey" | "apiPassword">,
   options?: {
     size?: number;
+    start?: number;
     maxLength?: number;
     minAge?: number;
     minMajesticQuality?: number;
@@ -115,19 +116,21 @@ export async function listExpiringPlRuntime(
     majesticQuality: Math.max(0, options?.minMajesticQuality || 0),
     order: options?.order || "deleted",
     size: Math.min(5000, Math.max(1, options?.size || 500)),
-    start: 0,
+    start: Math.max(0, Math.floor(options?.start || 0)),
   });
 }
 
 export async function listPlAuctionsRuntime(
   credentials: Pick<AftermarketRuntimeCredentials, "apiKey" | "apiPassword">,
-  options?: { size?: number; maxLength?: number; maxPrice?: number },
+  options?: { size?: number; start?: number; maxLength?: number; maxPrice?: number },
 ) {
   const config = getAftermarketConfig();
   const requestedSize = Math.min(5000, Math.max(1, options?.size || 500));
   const perKind = Math.min(1250, Math.max(100, Math.ceil(requestedSize / 4)));
   const maxLength = Math.min(30, Math.max(3, options?.maxLength || 14));
   const maxPrice = Math.max(1, options?.maxPrice || config.maxDomainPrice);
+  const globalStart = Math.max(0, Math.floor(options?.start || 0));
+  const perKindStart = Math.floor(globalStart / 4);
   const kinds = [
     { what: 2, kind: "auction" as const },
     { what: 3, kind: "last-minute" as const },
@@ -149,7 +152,7 @@ export async function listPlAuctionsRuntime(
         currency: "PLN",
         order: "price",
         size: perKind,
-        start: 0,
+        start: perKindStart,
       });
       return items.map((item) => ({ ...item, auctionKind: kind }));
     }),
