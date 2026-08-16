@@ -2,9 +2,13 @@ import { getAftermarketConfig } from "@/lib/aftermarket";
 import { provisionAftermarketKey } from "@/lib/aftermarket-provisioner";
 import { resolveAftermarketCredentials } from "@/lib/aftermarket-runtime";
 import {
+  aftermarketPendingClearCookie,
+  aftermarketPendingSetCookie,
   aftermarketVaultClearCookie,
   aftermarketVaultSetCookie,
+  readAftermarketPendingSession,
   readAftermarketVault,
+  type PendingAftermarketSession,
   type StoredAftermarketCredentials,
 } from "@/lib/aftermarket-vault";
 
@@ -39,6 +43,12 @@ function sameOrigin(request: Request) {
   } catch {
     return false;
   }
+}
+
+function jsonHeaders(...cookies: string[]) {
+  const headers = new Headers({ "Cache-Control": "no-store" });
+  for (const cookie of cookies) headers.append("Set-Cookie", cookie);
+  return headers;
 }
 
 export async function GET(request: Request) {
@@ -81,24 +91,44 @@ export async function POST(request: Request) {
     return Response.json({ error: "Podaj login i hasło do konta AfterMarket." }, { status: 400 });
   }
 
+  const pending = body.otp?.trim() ? readAftermarketPendingSession(request) : null;
   const result = await provisionAftermarketKey({
     login,
     password,
     otp: body.otp?.trim() || undefined,
     keyName: body.keyName?.trim() || "Domain Radar PL Sniper",
+    ...(pending ? { session: { url: pending.url, cookies: pending.cookies } } : {}),
   });
 
   if (!result.ok) {
     const status = result.code === "OTP_REQUIRED" || result.code === "HUMAN_VERIFICATION" ? 409 : 502;
+    if (result.code === "OTP_REQUIRED") {
+      const pendingSession: PendingAftermarketSession = {
+        version: 1,
+        url: result.session.url,
+        cookies: result.session.cookies,
+        createdAt: new Date().toISOString(),
+      };
+      return Response.json(
+        {
+          ok: false,
+          code: result.code,
+          error: result.message,
+          requiresOtp: true,
+          humanVerificationRequired: false,
+        },
+        { status, headers: jsonHeaders(aftermarketPendingSetCookie(pendingSession)) },
+      );
+    }
     return Response.json(
       {
         ok: false,
         code: result.code,
         error: result.message,
-        requiresOtp: result.code === "OTP_REQUIRED",
+        requiresOtp: false,
         humanVerificationRequired: result.code === "HUMAN_VERIFICATION",
       },
-      { status, headers: { "Cache-Control": "no-store" } },
+      { status, headers: jsonHeaders(aftermarketPendingClearCookie()) },
     );
   }
 
@@ -121,10 +151,10 @@ export async function POST(request: Request) {
       permissions: "sniper-read-only",
     },
     {
-      headers: {
-        "Cache-Control": "no-store",
-        "Set-Cookie": aftermarketVaultSetCookie(stored),
-      },
+      headers: jsonHeaders(
+        aftermarketVaultSetCookie(stored),
+        aftermarketPendingClearCookie(),
+      ),
     },
   );
 }
@@ -133,10 +163,10 @@ export async function DELETE() {
   return Response.json(
     { ok: true, connected: false },
     {
-      headers: {
-        "Cache-Control": "no-store",
-        "Set-Cookie": aftermarketVaultClearCookie(),
-      },
+      headers: jsonHeaders(
+        aftermarketVaultClearCookie(),
+        aftermarketPendingClearCookie(),
+      ),
     },
   );
 }
