@@ -215,11 +215,11 @@ export async function GET(request: Request) {
     if (mode === "market") {
       const perSourceSize = Math.min(800, Math.max(300, Math.ceil(limit * 0.7)));
       const start = url.searchParams.has("start") ? clampInt(url.searchParams.get("start"), 0, 0, 50000) : 0;
-      console.info("[PL_SNIPER_MARKET_START]", { start, perSourceSize, limit, maxLength, maxPrice });
+      console.info("[PL_SNIPER_MARKET_START]", { start, perSourceSize, limit, maxLength, priceFilter: "none" });
 
       const [expiringResult, auctionResult] = await Promise.allSettled([
         listExpiringPlRuntime(credentials, { size: perSourceSize, start, maxLength, order: "deleted", qualityPrefilter: false }),
-        listPlAuctionsRuntime(credentials, { size: perSourceSize, start, maxLength, maxPrice, order: "price", qualityPrefilter: false }),
+        listPlAuctionsRuntime(credentials, { size: perSourceSize, start, maxLength, maxPrice: null, order: "price", qualityPrefilter: false }),
       ]);
 
       const expiring = expiringResult.status === "fulfilled" ? expiringResult.value : [];
@@ -268,7 +268,7 @@ export async function GET(request: Request) {
         size: 800,
         start: 0,
         maxLength: 30,
-        maxPrice,
+        maxPrice: null,
         order: "endtime",
         qualityPrefilter: false,
       });
