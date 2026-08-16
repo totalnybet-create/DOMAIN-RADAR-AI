@@ -4,16 +4,32 @@ import { testAftermarketCredentials } from "@/lib/aftermarket-runtime";
 
 const AFTERMARKET_URL = "https://www.aftermarket.pl/";
 
+export type ProvisionSession = {
+  url: string;
+  cookies: Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    expires?: number;
+    httpOnly?: boolean;
+    secure?: boolean;
+    sameSite?: "Strict" | "Lax" | "None";
+  }>;
+};
+
 export type ProvisionRequest = {
   login: string;
   password: string;
   otp?: string;
   keyName?: string;
+  session?: ProvisionSession;
 };
 
 export type ProvisionResult =
   | { ok: true; apiKey: string; apiPassword: string; keyName: string }
-  | { ok: false; code: "OTP_REQUIRED" | "HUMAN_VERIFICATION" | "LOGIN_FAILED" | "PERMISSION_MAPPING_FAILED" | "KEY_EXTRACTION_FAILED" | "PROVISION_FAILED"; message: string };
+  | { ok: false; code: "OTP_REQUIRED"; message: string; session: ProvisionSession }
+  | { ok: false; code: "HUMAN_VERIFICATION" | "LOGIN_FAILED" | "PERMISSION_MAPPING_FAILED" | "KEY_EXTRACTION_FAILED" | "PROVISION_FAILED"; message: string };
 
 function normalized(value: string) {
   return value
@@ -83,7 +99,58 @@ async function submitNearestForm(page: Page, field: ElementHandle<Element>) {
   await waitSettled(page);
 }
 
+async function captureSession(page: Page): Promise<ProvisionSession> {
+  const cookies = (await page.cookies()).map((cookie) => ({
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    path: cookie.path,
+    ...(Number.isFinite(cookie.expires) ? { expires: cookie.expires } : {}),
+    httpOnly: cookie.httpOnly,
+    secure: cookie.secure,
+    ...(cookie.sameSite ? { sameSite: cookie.sameSite } : {}),
+  }));
+  return { url: page.url(), cookies };
+}
+
+async function verifyLoggedIn(page: Page) {
+  const text = await bodyText(page);
+  if (challengeFromText(text)) {
+    return { ok: false, code: "HUMAN_VERIFICATION", message: "AfterMarket uruchomił CAPTCHA lub inną weryfikację człowieka." } as const;
+  }
+  const stillHasPassword = Boolean(await page.$("input[type='password']"));
+  const loggedInSignal = text.includes("wyloguj") || text.includes("logout") || text.includes("moje konto") || text.includes("twoje konto");
+  if (stillHasPassword && !loggedInSignal) {
+    return { ok: false, code: "LOGIN_FAILED", message: "AfterMarket odrzucił dane logowania lub wymaga dodatkowego kroku." } as const;
+  }
+  return null;
+}
+
+async function continueOtpSession(page: Page, input: ProvisionRequest): Promise<ProvisionResult | null> {
+  if (!input.session) return null;
+  await page.setCookie(...input.session.cookies);
+  await page.goto(input.session.url, { waitUntil: "domcontentloaded", timeout: 25000 });
+  const text = await bodyText(page);
+  if (challengeFromText(text)) {
+    return { ok: false, code: "HUMAN_VERIFICATION", message: "AfterMarket wymaga weryfikacji człowieka przed dokończeniem 2FA." };
+  }
+  const otpField = await findOtpInput(page);
+  if (!otpField) {
+    const verification = await verifyLoggedIn(page);
+    if (!verification) return null;
+    return { ok: false, code: "LOGIN_FAILED", message: "Sesja 2FA wygasła. Rozpocznij połączenie ponownie." };
+  }
+  if (!input.otp?.trim()) {
+    return { ok: false, code: "OTP_REQUIRED", message: "Wpisz kod jednorazowy przesłany przez AfterMarket.", session: await captureSession(page) };
+  }
+  await fill(otpField, input.otp.trim());
+  await submitNearestForm(page, otpField);
+  return verifyLoggedIn(page);
+}
+
 async function logIn(page: Page, input: ProvisionRequest): Promise<ProvisionResult | null> {
+  if (input.session) return continueOtpSession(page, input);
+
   await page.goto(AFTERMARKET_URL, { waitUntil: "domcontentloaded", timeout: 25000 });
 
   let passwordField = await page.$("input[type='password']");
@@ -122,20 +189,27 @@ async function logIn(page: Page, input: ProvisionRequest): Promise<ProvisionResu
   const otpLikely = Boolean(otpField) || text.includes("kod jednorazowy") || text.includes("one-time code") || text.includes("kod autoryzacyjny");
   if (otpLikely) {
     if (!input.otp?.trim()) {
-      return { ok: false, code: "OTP_REQUIRED", message: "AfterMarket wymaga kodu jednorazowego. Wpisz go w Domain Radar i ponów połączenie." };
+      return {
+        ok: false,
+        code: "OTP_REQUIRED",
+        message: "AfterMarket wymaga kodu jednorazowego. Wpisz go w Domain Radar, aby dokończyć tę samą sesję.",
+        session: await captureSession(page),
+      };
     }
-    if (!otpField) return { ok: false, code: "OTP_REQUIRED", message: "AfterMarket wymaga kodu jednorazowego, ale formularz 2FA ma nieznany układ." };
+    if (!otpField) {
+      return {
+        ok: false,
+        code: "OTP_REQUIRED",
+        message: "AfterMarket wymaga kodu jednorazowego, ale formularz 2FA ma nieznany układ.",
+        session: await captureSession(page),
+      };
+    }
     await fill(otpField, input.otp.trim());
     await submitNearestForm(page, otpField);
     text = await bodyText(page);
   }
 
-  const stillHasPassword = Boolean(await page.$("input[type='password']"));
-  const loggedInSignal = text.includes("wyloguj") || text.includes("logout") || text.includes("moje konto") || text.includes("twoje konto");
-  if (stillHasPassword && !loggedInSignal) {
-    return { ok: false, code: "LOGIN_FAILED", message: "AfterMarket odrzucił dane logowania lub wymaga dodatkowego kroku." };
-  }
-  return null;
+  return verifyLoggedIn(page);
 }
 
 async function openCreateKeyPage(page: Page) {
@@ -174,7 +248,7 @@ async function openCreateKeyPage(page: Page) {
 }
 
 async function configureReadOnlyPermissions(page: Page) {
-  const result = await page.evaluate(() => {
+  return page.evaluate(() => {
     const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
     const forms = [...document.querySelectorAll<HTMLFormElement>("form")];
     const form = forms.find((candidate) => {
@@ -204,7 +278,6 @@ async function configureReadOnlyPermissions(page: Page) {
     }
     return { ok: Boolean(nameInput) && selected > 0, selected, reason: selected > 0 ? "" : "permissions" };
   });
-  return result;
 }
 
 async function fillKeyName(page: Page, keyName: string) {
