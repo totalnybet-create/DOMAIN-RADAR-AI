@@ -1,12 +1,14 @@
 import {
   domainAgeYears,
   getAftermarketConfig,
-  isAftermarketConfigured,
-  listExpiringPl,
-  listPlAuctions,
   scoreAuctionDetailed,
   scoreExpiringDetailed,
 } from "@/lib/aftermarket";
+import {
+  listExpiringPlRuntime,
+  listPlAuctionsRuntime,
+  resolveAftermarketCredentials,
+} from "@/lib/aftermarket-runtime";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,11 +24,12 @@ function clampFloat(value: string | null, fallback: number, min: number, max: nu
 }
 
 export async function GET(request: Request) {
-  if (!isAftermarketConfigured()) {
+  const credentials = resolveAftermarketCredentials(request);
+  if (!credentials) {
     return Response.json(
       {
         connected: false,
-        error: "AfterMarket API is not configured.",
+        error: "AfterMarket API is not configured. Use Połącz AfterMarket in Domain Radar.",
       },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
@@ -42,7 +45,7 @@ export async function GET(request: Request) {
 
   try {
     if (mode === "auctions") {
-      const source = await listPlAuctions({
+      const source = await listPlAuctionsRuntime(credentials, {
         size: Math.min(5000, Math.max(limit * 8, 800)),
         maxLength,
         maxPrice,
@@ -84,6 +87,7 @@ export async function GET(request: Request) {
       return Response.json(
         {
           connected: true,
+          connectionSource: credentials.source,
           engine: "SZTOS_SCORE_V2",
           mode,
           scanned: source.length,
@@ -97,7 +101,7 @@ export async function GET(request: Request) {
       );
     }
 
-    const source = await listExpiringPl({
+    const source = await listExpiringPlRuntime(credentials, {
       size: Math.min(5000, Math.max(limit * 10, 1000)),
       maxLength,
       order: "deleted",
@@ -141,6 +145,7 @@ export async function GET(request: Request) {
     return Response.json(
       {
         connected: true,
+        connectionSource: credentials.source,
         engine: "SZTOS_SCORE_V2",
         mode,
         scanned: source.length,
@@ -156,6 +161,7 @@ export async function GET(request: Request) {
     return Response.json(
       {
         connected: true,
+        connectionSource: credentials.source,
         engine: "SZTOS_SCORE_V2",
         error: error instanceof Error ? error.message : "PL Sniper scan failed.",
       },
