@@ -100,13 +100,15 @@ export async function listExpiringPlRuntime(
     maxLength?: number;
     minAge?: number;
     minMajesticQuality?: number;
+    qualityPrefilter?: boolean;
     order?: "name" | "deleted" | "archive" | "created" | "expires" | "age" | "majesticLinks" | "majesticDomains" | "majesticQuality";
   },
 ) {
+  const qualityPrefilter = options?.qualityPrefilter !== false;
   return callAftermarket<ExpiringDomain[]>(credentials, "/buyer/expiring/domain/list", {
     tld: "pl",
-    noNumbers: true,
-    noHyphens: true,
+    noNumbers: qualityPrefilter,
+    noHyphens: qualityPrefilter,
     idn: 2,
     premium: 0,
     future: 0,
@@ -122,7 +124,14 @@ export async function listExpiringPlRuntime(
 
 export async function listPlAuctionsRuntime(
   credentials: Pick<AftermarketRuntimeCredentials, "apiKey" | "apiPassword">,
-  options?: { size?: number; start?: number; maxLength?: number; maxPrice?: number },
+  options?: {
+    size?: number;
+    start?: number;
+    maxLength?: number;
+    maxPrice?: number;
+    qualityPrefilter?: boolean;
+    order?: "name" | "endtime" | "price" | "offers" | "length" | "views";
+  },
 ) {
   const config = getAftermarketConfig();
   const requestedSize = Math.min(5000, Math.max(1, options?.size || 500));
@@ -131,6 +140,7 @@ export async function listPlAuctionsRuntime(
   const maxPrice = Math.max(1, options?.maxPrice || config.maxDomainPrice);
   const globalStart = Math.max(0, Math.floor(options?.start || 0));
   const perKindStart = Math.floor(globalStart / 4);
+  const qualityPrefilter = options?.qualityPrefilter !== false;
   const kinds = [
     { what: 2, kind: "auction" as const },
     { what: 3, kind: "last-minute" as const },
@@ -143,14 +153,14 @@ export async function listPlAuctionsRuntime(
       const items = await callAftermarket<MarketAuction[]>(credentials, "/listing/list", {
         tld: "pl",
         what,
-        noNumbers: true,
-        noHyphens: true,
+        noNumbers: qualityPrefilter,
+        noHyphens: qualityPrefilter,
         noIDN: true,
         lengthFrom: 2,
         lengthTo: maxLength,
         priceTo: maxPrice,
         currency: "PLN",
-        order: "price",
+        order: options?.order || "price",
         size: perKind,
         start: perKindStart,
       });
