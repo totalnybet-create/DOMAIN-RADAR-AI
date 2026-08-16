@@ -23,6 +23,16 @@ function clampFloat(value: string | null, fallback: number, min: number, max: nu
   return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
 }
 
+function scanStart(url: URL, scanSize: number) {
+  const explicit = url.searchParams.get("start");
+  if (explicit !== null) return clampInt(explicit, 0, 0, 50000);
+
+  // Manual scans should not hammer the same first page forever. Seven windows makes
+  // consecutive clicks rotate naturally and also works well with future 5-minute cron runs.
+  const window = Math.floor(Date.now() / 1000) % 7;
+  return window * scanSize;
+}
+
 export async function GET(request: Request) {
   const credentials = resolveAftermarketCredentials(request);
   if (!credentials) {
@@ -46,17 +56,26 @@ export async function GET(request: Request) {
 
   try {
     if (mode === "auctions") {
-      // Keep a single interactive scan responsive. The AfterMarket API supports paging,
-      // so broad/deep scans should be done in multiple bounded requests instead of
-      // blocking one browser request with thousands of marketplace records.
       const scanSize = Math.min(800, Math.max(limit * 2, 300));
-      console.info("[PL_SNIPER_SCAN_START]", { mode, limit, scanSize, maxLength, maxPrice });
+      let start = scanStart(url, scanSize);
+      console.info("[PL_SNIPER_SCAN_START]", { mode, limit, scanSize, start, maxLength, maxPrice });
 
-      const source = await listPlAuctionsRuntime(credentials, {
+      let source = await listPlAuctionsRuntime(credentials, {
         size: scanSize,
+        start,
         maxLength,
         maxPrice,
       });
+
+      if (!source.length && start > 0) {
+        start = 0;
+        source = await listPlAuctionsRuntime(credentials, {
+          size: scanSize,
+          start,
+          maxLength,
+          maxPrice,
+        });
+      }
 
       const evaluated = source.map((item) => {
         const assessment = scoreAuctionDetailed(item, maxPrice);
@@ -90,12 +109,15 @@ export async function GET(request: Request) {
         .filter((item) => !item.rejectedReason && item.score >= minScore && !item.trademarkRisk)
         .sort((a, b) => b.score - a.score || (a.minBid ?? a.price ?? Infinity) - (b.minBid ?? b.price ?? Infinity));
       const results = qualified.slice(0, limit);
+      const bestScoreSeen = evaluated.reduce((best, item) => Math.max(best, item.score), 0);
 
       console.info("[PL_SNIPER_SCAN_DONE]", {
         mode,
+        start,
         scanned: source.length,
         qualified: qualified.length,
         returned: results.length,
+        bestScoreSeen,
         durationMs: Date.now() - startedAt,
       });
 
@@ -105,10 +127,13 @@ export async function GET(request: Request) {
           connectionSource: credentials.source,
           engine: "SZTOS_SCORE_V2",
           mode,
+          scanStart: start,
+          nextStart: start + scanSize,
           scanned: source.length,
           qualified: qualified.length,
           returned: results.length,
           rejected: source.length - qualified.length,
+          bestScoreSeen,
           limits: { limit, maxLength, minScore, maxPrice },
           results,
         },
@@ -117,13 +142,25 @@ export async function GET(request: Request) {
     }
 
     const scanSize = Math.min(800, Math.max(limit * 2, 250));
-    console.info("[PL_SNIPER_SCAN_START]", { mode, limit, scanSize, maxLength });
+    let start = scanStart(url, scanSize);
+    console.info("[PL_SNIPER_SCAN_START]", { mode, limit, scanSize, start, maxLength });
 
-    const source = await listExpiringPlRuntime(credentials, {
+    let source = await listExpiringPlRuntime(credentials, {
       size: scanSize,
+      start,
       maxLength,
       order: "deleted",
     });
+
+    if (!source.length && start > 0) {
+      start = 0;
+      source = await listExpiringPlRuntime(credentials, {
+        size: scanSize,
+        start,
+        maxLength,
+        order: "deleted",
+      });
+    }
 
     const evaluated = source.map((item) => {
       const assessment = scoreExpiringDetailed(item);
@@ -159,12 +196,15 @@ export async function GET(request: Request) {
       .filter((item) => !item.rejectedReason && item.score >= minScore && !item.trademarkRisk)
       .sort((a, b) => b.score - a.score || (b.majesticQuality || 0) - (a.majesticQuality || 0) || (a.deletedTime || Infinity) - (b.deletedTime || Infinity));
     const results = qualified.slice(0, limit);
+    const bestScoreSeen = evaluated.reduce((best, item) => Math.max(best, item.score), 0);
 
     console.info("[PL_SNIPER_SCAN_DONE]", {
       mode,
+      start,
       scanned: source.length,
       qualified: qualified.length,
       returned: results.length,
+      bestScoreSeen,
       durationMs: Date.now() - startedAt,
     });
 
@@ -174,10 +214,13 @@ export async function GET(request: Request) {
         connectionSource: credentials.source,
         engine: "SZTOS_SCORE_V2",
         mode,
+        scanStart: start,
+        nextStart: start + scanSize,
         scanned: source.length,
         qualified: qualified.length,
         returned: results.length,
         rejected: source.length - qualified.length,
+        bestScoreSeen,
         limits: { limit, maxLength, minScore, maxPrice },
         results,
       },
