@@ -10,7 +10,7 @@
     "test:sniper": "node --experimental-strip-types --test lib/aftermarket.test.ts"
   },
   "dependencies": {
-    "@neondatabase/auth": "^0.2.0",
+    "@neondatabase/auth": "0.4.2-beta",
     "@sparticuz/chromium": "149.0.0",
     "next": "16.3.0",
     "puppeteer-core": "25.1.0",
