@@ -41,8 +41,13 @@ async function clickByText(page: Page, phrases: string[]) {
 }
 
 async function fill(handle: ElementHandle<Element>, value: string) {
-  await handle.click({ clickCount: 3 });
-  await handle.type(value, { delay: 12 });
+  await handle.evaluate((node, nextValue) => {
+    if (!(node instanceof HTMLInputElement) && !(node instanceof HTMLTextAreaElement)) return;
+    node.focus();
+    node.value = nextValue;
+    node.dispatchEvent(new Event("input", { bubbles: true }));
+    node.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
 }
 
 async function waitSettled(page: Page) {
@@ -67,16 +72,14 @@ async function findOtpInput(page: Page) {
 }
 
 async function submitNearestForm(page: Page, field: ElementHandle<Element>) {
-  const button = await field.evaluateHandle((node) => {
+  const clicked = await field.evaluate((node) => {
     const form = node.closest("form");
-    return form?.querySelector("button[type='submit'],input[type='submit'],button") || null;
+    const button = form?.querySelector<HTMLElement>("button[type='submit'],input[type='submit'],button");
+    if (!button) return false;
+    button.click();
+    return true;
   });
-  const element = button.asElement();
-  if (element) {
-    await element.click();
-  } else {
-    await page.keyboard.press("Enter");
-  }
+  if (!clicked) await page.keyboard.press("Enter");
   await waitSettled(page);
 }
 
@@ -282,7 +285,7 @@ export async function provisionAftermarketKey(input: ProvisionRequest): Promise<
       return { ok: false, code: "KEY_EXTRACTION_FAILED", message: "Klucz mógł zostać utworzony, ale AfterMarket zmienił układ strony i nie udało się bezpiecznie odczytać obu danych dostępowych." };
     }
 
-    await testAftermarketCredentials({ ...credentials, source: "vault" });
+    await testAftermarketCredentials(credentials);
     return { ok: true, ...credentials, keyName };
   } catch (error) {
     return { ok: false, code: "PROVISION_FAILED", message: error instanceof Error ? error.message : "Provisioning AfterMarket nie powiódł się." };
