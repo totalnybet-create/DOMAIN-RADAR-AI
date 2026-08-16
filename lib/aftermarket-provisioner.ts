@@ -17,18 +17,42 @@ export type ProvisionSession = {
   }>;
 };
 
+export type ProvisionKeyMode = "auto" | "new";
+
 export type ProvisionRequest = {
   login: string;
   password: string;
   otp?: string;
   keyName?: string;
+  keyMode?: ProvisionKeyMode;
   session?: ProvisionSession;
 };
 
 export type ProvisionResult =
-  | { ok: true; apiKey: string; apiPassword: string; keyName: string }
+  | { ok: true; apiKey: string; apiPassword: string; keyName: string; keySource: "existing" | "created" }
   | { ok: false; code: "OTP_REQUIRED"; message: string; session: ProvisionSession }
-  | { ok: false; code: "HUMAN_VERIFICATION" | "LOGIN_FAILED" | "PERMISSION_MAPPING_FAILED" | "KEY_EXTRACTION_FAILED" | "PROVISION_FAILED"; message: string };
+  | {
+      ok: false;
+      code:
+        | "HUMAN_VERIFICATION"
+        | "LOGIN_FAILED"
+        | "PERMISSION_MAPPING_FAILED"
+        | "KEY_EXTRACTION_FAILED"
+        | "EXISTING_KEY_FOUND"
+        | "PROVISION_FAILED";
+      message: string;
+    };
+
+type ExistingKeyCandidate = {
+  text: string;
+  apiKey: string | null;
+  exactName: boolean;
+};
+
+type ExistingKeyLookup =
+  | { status: "none" }
+  | { status: "reused"; apiKey: string; apiPassword: string; keyName: string }
+  | { status: "blocked"; message: string };
 
 function normalized(value: string) {
   return value
@@ -50,6 +74,29 @@ async function clickByText(page: Page, phrases: string[]) {
       return true;
     } catch {
       continue;
+    }
+  }
+  return false;
+}
+
+async function clickRowAction(page: Page, rowText: string, phrases: string[]) {
+  const wantedRow = normalized(rowText);
+  const wantedActions = phrases.map(normalized);
+  const rows = await page.$$("tr,[role='row'],.list-group-item,.card");
+  for (const row of rows) {
+    const text = normalized(await row.evaluate((node) => (node.textContent || "").trim()));
+    if (!text || text !== wantedRow) continue;
+    const actions = await row.$$("a,button,[role='button']");
+    for (const action of actions) {
+      const actionText = normalized(await action.evaluate((node) => (node.textContent || "").trim()));
+      if (!actionText || !wantedActions.some((phrase) => actionText.includes(phrase))) continue;
+      try {
+        await action.click();
+        await waitSettled(page);
+        return true;
+      } catch {
+        continue;
+      }
     }
   }
   return false;
@@ -210,6 +257,188 @@ async function logIn(page: Page, input: ProvisionRequest): Promise<ProvisionResu
   return verifyLoggedIn(page);
 }
 
+async function openKeyListPage(page: Page) {
+  const direct = await page.evaluate(() => {
+    const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    const anchors = [...document.querySelectorAll<HTMLAnchorElement>("a[href]")];
+    const found = anchors.find((anchor) => {
+      const text = normalize(anchor.textContent || "");
+      return text.includes("lista kluczy api") || text.includes("list of api keys");
+    });
+    return found?.href || null;
+  });
+  if (direct) {
+    await page.goto(direct, { waitUntil: "domcontentloaded", timeout: 20000 });
+    return true;
+  }
+
+  await clickByText(page, ["konto", "account"]);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (await clickByText(page, ["lista kluczy api", "list of api keys"])) {
+    await waitSettled(page);
+    return true;
+  }
+  return false;
+}
+
+async function existingKeyCandidates(page: Page, keyName: string): Promise<ExistingKeyCandidate[]> {
+  return page.evaluate((preferredName) => {
+    const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+    const preferred = normalize(preferredName);
+    const rows = [...document.querySelectorAll<HTMLElement>("tr,[role='row'],.list-group-item,.card")];
+    const result: ExistingKeyCandidate[] = [];
+    for (const row of rows) {
+      const rawText = (row.innerText || row.textContent || "").trim();
+      const text = normalize(rawText);
+      if (!text) continue;
+      const actions = [...row.querySelectorAll<HTMLElement>("a,button,[role='button']")].map((item) => normalize(item.textContent || ""));
+      const hasShowPassword = actions.some((item) => item.includes("pokaz haslo") || item.includes("show password"));
+      if (!hasShowPassword) continue;
+
+      const inputKey = [...row.querySelectorAll<HTMLInputElement>("input")]
+        .map((field) => ({
+          value: field.value?.trim() || "",
+          meta: normalize(`${field.name} ${field.id} ${field.placeholder || ""} ${field.labels?.[0]?.textContent || ""}`),
+        }))
+        .find((item) => item.value.length >= 8 && /(api.?key|klucz)/.test(item.meta) && !/(pass|hasl)/.test(item.meta))?.value;
+
+      const compactTokens = rawText
+        .split(/\s+/)
+        .map((item) => item.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9_.-]+$/g, ""))
+        .filter((item) => item.length >= 12 && /^[A-Za-z0-9_.-]+$/.test(item) && /[A-Za-z]/.test(item) && /\d/.test(item));
+
+      result.push({
+        text: rawText,
+        apiKey: inputKey || compactTokens[0] || null,
+        exactName: preferred.length > 0 && text.includes(preferred),
+      });
+    }
+    return result;
+  }, keyName);
+}
+
+async function currentPermissionsAreSafe(page: Page) {
+  return page.evaluate(() => {
+    const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    const deny = /(kup|buy|bid|licyt|register|rejestr|renew|odnow|delete|usun|transfer|push|dns|invoice|platn|payment|payout|wypl)/;
+    const allow = /(buyer\/expiring\/domain\/list|listing\/list|expiring|wygas|spadaj|aukcj|listing|gield|market.*list|lista.*ofert|ofert.*lista)/;
+    const checked = [...document.querySelectorAll<HTMLInputElement>("input[type='checkbox']:checked")].map((box) => {
+      const label = box.labels?.length ? [...box.labels].map((item) => item.textContent || "").join(" ") : box.parentElement?.textContent || "";
+      return normalize(`${box.name} ${box.id} ${box.value} ${label}`);
+    });
+    return {
+      safe: checked.length > 0 && !checked.some((meta) => deny.test(meta)) && checked.some((meta) => allow.test(meta)),
+      relevant: checked.filter((meta) => allow.test(meta)).length,
+      dangerous: checked.filter((meta) => deny.test(meta)).length,
+    };
+  });
+}
+
+async function extractExistingCredentials(page: Page, knownApiKey: string | null, accountPassword: string) {
+  return page.evaluate(
+    ({ knownKey, accountPass }) => {
+      const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      const candidates = [...document.querySelectorAll<HTMLInputElement>("input")]
+        .filter((field) => field.value && field.type !== "hidden")
+        .map((field) => {
+          const label = field.labels?.length ? [...field.labels].map((item) => item.textContent || "").join(" ") : field.parentElement?.textContent || "";
+          return { value: field.value.trim(), meta: normalize(`${field.name} ${field.id} ${label}`) };
+        });
+      const key =
+        candidates.find((item) => /(api.?key|klucz)/.test(item.meta) && !/(pass|hasl)/.test(item.meta) && item.value.length >= 8)?.value ||
+        knownKey;
+      const password = candidates.find(
+        (item) =>
+          item.value !== accountPass &&
+          item.value.length >= 8 &&
+          /(api.*pass|key.*pass|hasl.*klucz|klucz.*hasl|password.*api)/.test(item.meta),
+      )?.value;
+      if (key && password) return { apiKey: key, apiPassword: password };
+
+      const text = document.body?.innerText || "";
+      const keyMatch = text.match(/(?:API\s*key|klucz(?:\s*API)?)\s*[:\-]?\s*([A-Za-z0-9_\-.]{8,})/i);
+      const passwordMatch = text.match(/(?:API\s*key\s*password|has(?:ł|l)o\s*(?:do\s*)?klucza(?:\s*API)?|key\s*password)\s*[:\-]?\s*([A-Za-z0-9_\-.!@#$%^&*]{8,})/i);
+      const finalKey = keyMatch?.[1] || key;
+      if (!finalKey || !passwordMatch?.[1] || passwordMatch[1] === accountPass) return null;
+      return { apiKey: finalKey, apiPassword: passwordMatch[1] };
+    },
+    { knownKey: knownApiKey, accountPass: accountPassword },
+  );
+}
+
+async function tryReuseExistingKey(page: Page, keyName: string, accountPassword: string): Promise<ExistingKeyLookup> {
+  if (!(await openKeyListPage(page))) return { status: "none" };
+  const listText = await bodyText(page);
+  if (challengeFromText(listText)) {
+    return { status: "blocked", message: "AfterMarket wymaga dodatkowej weryfikacji przed odczytem listy kluczy API." };
+  }
+
+  const candidates = await existingKeyCandidates(page, keyName);
+  if (candidates.length === 0) return { status: "none" };
+  const matching = candidates.filter((candidate) => candidate.exactName);
+  const candidate = matching[0] || (candidates.length === 1 ? candidates[0] : null);
+  if (!candidate) return { status: "none" };
+
+  const listUrl = page.url();
+  if (!(await clickRowAction(page, candidate.text, ["uprawnienia", "permissions"]))) {
+    return {
+      status: "blocked",
+      message: "Wykryłem istniejący klucz API, ale nie mogę bezpiecznie sprawdzić jego uprawnień. Użyj ręcznego importu albo świadomie wybierz utworzenie nowego klucza.",
+    };
+  }
+
+  const permissions = await currentPermissionsAreSafe(page);
+  await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+  if (!permissions.safe) {
+    return {
+      status: "blocked",
+      message: permissions.dangerous > 0
+        ? "Wykryłem istniejący klucz, ale ma szersze uprawnienia niż PL Sniper. Nie użyję go automatycznie."
+        : "Wykryłem istniejący klucz, ale nie potrafię potwierdzić wymaganych uprawnień read-only.",
+    };
+  }
+
+  if (!(await clickRowAction(page, candidate.text, ["pokaz haslo", "show password"]))) {
+    return {
+      status: "blocked",
+      message: "Wykryłem bezpieczny istniejący klucz, ale AfterMarket nie pozwolił automatycznie otworzyć formularza „Pokaż hasło”.",
+    };
+  }
+
+  const passwordField = await page.$("input[type='password']");
+  if (!passwordField) {
+    return {
+      status: "blocked",
+      message: "Wykryłem istniejący klucz, ale formularz ponownego wyświetlenia hasła ma nieznany układ.",
+    };
+  }
+  await fill(passwordField, accountPassword);
+  await submitNearestForm(page, passwordField);
+
+  const revealText = await bodyText(page);
+  if (challengeFromText(revealText)) {
+    return { status: "blocked", message: "AfterMarket wymaga dodatkowej weryfikacji przed pokazaniem hasła klucza API." };
+  }
+
+  const credentials = await extractExistingCredentials(page, candidate.apiKey, accountPassword);
+  if (!credentials) {
+    return {
+      status: "blocked",
+      message: "Wykryłem istniejący klucz, ale nie udało się bezpiecznie odczytać pary API key + API password.",
+    };
+  }
+
+  try {
+    await testAftermarketCredentials(credentials);
+  } catch {
+    return {
+      status: "blocked",
+      message: "Wykryłem istniejący klucz, ale test wymaganych odczytów PL Snipera nie przeszedł. Nie utworzę duplikatu bez Twojej decyzji.",
+    };
+  }
+  return { status: "reused", ...credentials, keyName };
+}
+
 async function openCreateKeyPage(page: Page) {
   const direct = await page.evaluate(() => {
     const anchors = [...document.querySelectorAll<HTMLAnchorElement>("a[href]")];
@@ -317,6 +546,7 @@ export async function provisionAftermarketKey(input: ProvisionRequest): Promise<
   const login = input.login.trim();
   const password = input.password;
   const keyName = (input.keyName?.trim() || "Domain Radar PL Sniper").slice(0, 80);
+  const keyMode = input.keyMode || "auto";
   if (!login || password.length < 6) return { ok: false, code: "LOGIN_FAILED", message: "Podaj poprawny login i hasło AfterMarket." };
 
   const browser = await puppeteer.launch({
@@ -332,6 +562,16 @@ export async function provisionAftermarketKey(input: ProvisionRequest): Promise<
 
     const loginFailure = await logIn(page, { ...input, login, password });
     if (loginFailure) return loginFailure;
+
+    if (keyMode === "auto") {
+      const existing = await tryReuseExistingKey(page, keyName, password);
+      if (existing.status === "reused") {
+        return { ok: true, apiKey: existing.apiKey, apiPassword: existing.apiPassword, keyName: existing.keyName, keySource: "existing" };
+      }
+      if (existing.status === "blocked") {
+        return { ok: false, code: "EXISTING_KEY_FOUND", message: existing.message };
+      }
+    }
 
     if (!(await openCreateKeyPage(page))) {
       return { ok: false, code: "PROVISION_FAILED", message: "Nie udało się otworzyć formularza tworzenia klucza API w AfterMarket." };
@@ -357,7 +597,7 @@ export async function provisionAftermarketKey(input: ProvisionRequest): Promise<
     }
 
     await testAftermarketCredentials(credentials);
-    return { ok: true, ...credentials, keyName };
+    return { ok: true, ...credentials, keyName, keySource: "created" };
   } catch (error) {
     return { ok: false, code: "PROVISION_FAILED", message: error instanceof Error ? error.message : "Provisioning AfterMarket nie powiódł się." };
   } finally {
