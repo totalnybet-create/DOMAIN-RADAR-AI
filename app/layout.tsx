@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import BottomNav from "./BottomNav";
 import "./globals.css";
 import "./mobile-nav.css";
+import "./bot-theme.css";
 
 export const metadata: Metadata = {
   title: {
